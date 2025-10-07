@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket Event Test Console</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        
+        .test-panel {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        button {
+            background: #3498db;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            margin: 5px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        
+        button:hover {
+            background: #2980b9;
+        }
+        
+        button.success { background: #27ae60; }
+        button.error { background: #e74c3c; }
+        button.warning { background: #e67e22; }
+        
+        .iframe-container {
+            border: 2px solid #ddd;
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        
+        iframe {
+            width: 100%;
+            height: 600px;
+            border: none;
+        }
+        
+        .instructions {
+            background: #ecf0f1;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        
+        .status {
+            background: #2c3e50;
+            color: white;
+            padding: 10px;
+            border-radius: 5px;
+            font-family: monospace;
+        }
+    </style>
+</head>
+<body>
+    <h1>🧪 NFC WebSocket Event Tester</h1>
+    
+    <div class="instructions">
+        <h3>Instructions for Manual Testing:</h3>
+        <p><strong>Option 1:</strong> Use the buttons below to send events to the iframe</p>
+        <p><strong>Option 2:</strong> Open browser dev tools (F12) on the iframe and run JavaScript commands directly</p>
+        <p><strong>Option 3:</strong> Run <code>python test-server.py</code> and open <code>http://localhost:5000</code></p>
+    </div>
+
+    <div class="test-panel">
+        <h3>Event Test Controls</h3>
+        <button onclick="triggerConnect()" class="success">🔗 Connect</button>
+        <button onclick="triggerDisconnect()" class="warning">⚠️ Disconnect</button>
+        <button onclick="triggerReload()">🔄 Reload Event</button>
+        <button onclick="triggerCardSuccess()" class="success">✅ Card Success</button>
+        <button onclick="triggerCardUnauthorized()" class="error">❌ Card Unauthorized</button>
+        <button onclick="runSequence()">🎬 Run Test Sequence</button>
+    </div>
+
+    <div class="test-panel">
+        <h3>Manual JavaScript Commands (use in browser dev tools on iframe):</h3>
+        <div class="status">
+            <div>// Simulate WebSocket events manually:</div>
+            <div>updateStatus('Connected - Ready for cards', '#27ae60', '🔗');</div>
+            <div>updateStatus('Connection lost - Retrying...', '#e67e22', '⚠️');</div>
+            <div>showCardEvent('Card authorized successfully!', true);</div>
+            <div>showCardEvent('Card not authorized!', false);</div>
+            <div>updateStatus('Card detected - Reloading...', '#3498db', '🔄');</div>
+        </div>
+    </div>
+
+    <div class="iframe-container">
+        <iframe id="nfcFrame" src="index.html"></iframe>
+    </div>
+
+    <script>
+        function getIframeWindow() {
+            return document.getElementById('nfcFrame').contentWindow;
+        }
+
+        function triggerConnect() {
+            const iframe = getIframeWindow();
+            if (iframe.updateStatus && iframe.updateSystemStatus) {
+                iframe.updateStatus('Ready - Present your card', '#27ae60', '💳');
+                iframe.updateSystemStatus('Connected', 'rgba(39, 174, 96, 0.9)', '🟢');
+            }
+        }
+
+        function triggerDisconnect() {
+            const iframe = getIframeWindow();
+            if (iframe.updateStatus && iframe.updateSystemStatus) {
+                iframe.updateStatus('Connection lost - Retrying...', '#e67e22', '⚠️', false, 0, false);
+                iframe.updateSystemStatus('Disconnected', 'rgba(231, 76, 60, 0.9)', '🔴');
+            }
+        }
+
+        function triggerReload() {
+            const iframe = getIframeWindow();
+            if (iframe.updateStatus) {
+                iframe.updateStatus('Card detected - Reloading...', '#3498db', '🔄');
+                // Don't actually reload in test mode
+                setTimeout(() => {
+                    iframe.updateStatus('Ready for next card', '#27ae60', '👍');
+                }, 1000);
+            }
+        }
+
+        function triggerCardSuccess() {
+            const iframe = getIframeWindow();
+            if (iframe.showCardEvent && iframe.updateStatus) {
+                iframe.showCardEvent('Card authorized successfully!', true);
+                iframe.updateStatus('Card authorized', '#27ae60', '✅', true, 4000);
+            }
+        }
+
+        function triggerCardUnauthorized() {
+            const iframe = getIframeWindow();
+            if (iframe.showCardEvent && iframe.updateStatus) {
+                iframe.showCardEvent('Card not authorized!', false);
+                iframe.updateStatus('Unauthorized card', '#e74c3c', '❌', true, 5000);
+            }
+        }
+
+        function runSequence() {
+            const events = [
+                () => triggerConnect(),
+                () => triggerReload(),
+                () => triggerCardSuccess(),
+                () => triggerReload(),
+                () => triggerCardUnauthorized(),
+                () => triggerDisconnect(),
+                () => triggerConnect()
+            ];
+
+            events.forEach((event, index) => {
+                setTimeout(event, index * 2000);
+            });
+        }
+
+        // Wait for iframe to load before enabling buttons
+        document.getElementById('nfcFrame').onload = function() {
+            console.log('NFC frame loaded - test controls ready');
+        };
+    </script>
+</body>
+</html>

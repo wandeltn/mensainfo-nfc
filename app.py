@@ -107,5 +107,5 @@ if __name__ == '__main__':
         print(f"Failed to initialize NFC reader: {e} \nMake sure the NFC reader is connected and try again.")
 
     # reader = nfc.Reader()
-    # You can change the interval here if needed, e.g., card_check_loop(sleep_interval=5)
+    # You can change the interval here if needbed, e.g., card_check_loop(sleep_interval=5)
     socketio.run(app, host='0.0.0.0', port=5000, allow_unsafe_werkzeug=True)
