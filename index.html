@@ -359,7 +359,7 @@
             socket.on('nfc_reader_unavailable', (data) => {
                 console.error('NFC reader unavailable:', data);
                 updateStatus('NFC-Lesegerät nicht erkannt', '#e74c3c', '🚫', false, 0, false);
-                updateSystemStatus('NFC Fehler', 'rgba(231, 76, 60, 0.9)', '🚫');
+                updateSystemStatus('NFC Error', 'rgba(231, 76, 60, 0.9)', '🚫');
                 
                 // Add visual indication for missing NFC reader
                 const container = document.getElementById('main-container');
