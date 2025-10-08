@@ -32,6 +32,22 @@ nfc_reader_available = False
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
+def cleanup_nfc_reader():
+    """
+    Safely cleanup the NFC reader instance
+    """
+    global reader, nfc_reader_available
+    
+    if reader is not None:
+        try:
+            reader.close()
+            logger.debug("NFC reader closed successfully")
+        except Exception as e:
+            logger.debug(f"Error closing NFC reader: {e}")
+        finally:
+            reader = None
+            nfc_reader_available = False
+
 # Database server configuration
 DATABASE_URL = "http://mensacheck.n-s-w.info"
 VALIDATION_HEADERS = {
@@ -113,6 +129,7 @@ def get_html_content():
 def test_nfc_reader_availability():
     """
     Test if the NFC reader is available and working.
+    Always creates a fresh reader instance to avoid stale connections.
     
     Returns:
         bool: True if reader is available, False otherwise
@@ -120,14 +137,33 @@ def test_nfc_reader_availability():
     global reader, nfc_reader_available
     
     try:
-        if reader is None:
-            logger.info(f"Initializing NFC reader on {OS_NAME}...")
-            reader = nfc.Reader()
+        # Always create a fresh reader instance to avoid stale connections
+        old_reader = reader
+        reader = None
+        
+        # Clean up old reader if it exists
+        if old_reader is not None:
+            try:
+                old_reader.close()
+            except:
+                pass
+        
+        logger.info(f"Initializing fresh NFC reader instance on {OS_NAME}...")
+        reader = nfc.Reader()
             
         # Try to connect to test availability
         reader.connect()
+        
+        # Test if we can actually communicate with the reader
+        # by attempting to get reader info or similar non-card operation
+        try:
+            # This will throw an exception if reader is not properly connected
+            reader.connect()  # Double-check connection
+        except Exception as conn_test_e:
+            raise Exception(f"Reader connection test failed: {conn_test_e}")
+        
         nfc_reader_available = True
-        logger.info(f"NFC reader is available and working on {OS_NAME}")
+        logger.info(f"✅ NFC reader is available and working on {OS_NAME}")
         
         # Emit reader available event
         socketio.emit('nfc_reader_available')
@@ -136,14 +172,22 @@ def test_nfc_reader_availability():
     except Exception as e:
         nfc_reader_available = False
         
+        # Clean up failed reader instance
+        if reader is not None:
+            try:
+                reader.close()
+            except:
+                pass
+            reader = None
+        
         # Provide OS-specific error information
-        error_context = f"NFC reader not available on {OS_NAME}: {e}"
+        error_context = f"❌ NFC reader not available on {OS_NAME}: {e}"
         if IS_WINDOWS:
             error_context += " (Check USB drivers and permissions)"
         elif IS_LINUX:
             error_context += " (Check udev rules and user permissions)"
             
-        logger.error(error_context)
+        logger.warning(error_context)
         
         # Emit reader unavailable event
         socketio.emit('nfc_reader_unavailable', {
@@ -156,30 +200,63 @@ def test_nfc_reader_availability():
 def try_connect_and_get_uid():
     """
     Attempt to connect to NFC reader and get card UID.
+    Handles reconnection scenarios and reader state management.
     
     Returns:
         str or None: Card UID in uppercase hex format, or None if no card/error
     """
-    global nfc_reader_available
+    global nfc_reader_available, reader
     
-    if not nfc_reader_available:
+    if not nfc_reader_available or reader is None:
         return None
         
     try:
+        # Ensure connection is established
         reader.connect()
+        
+        # Attempt to get card UID
         arr = reader.get_uid()
         if arr:
             result = ''.join(f'{x:02X}' for x in arr)
             return result
         else:
             return None
+            
     except Exception as e:
-        logger.debug(f"NFC reading error: {e}")
+        error_msg = str(e).lower()
+        logger.debug(f"NFC reading error on {OS_NAME}: {e}")
+        
+        # Check for various connection/reader issues that indicate reader problems
+        connection_error_indicators = [
+            "no readers available",
+            "reader not found", 
+            "device not found",
+            "access denied",
+            "operation not supported",
+            "connection lost",
+            "device disconnected",
+            "usb device not found",
+            "permission denied"
+        ]
         
         # Check if this is a connectivity issue that requires re-testing availability
-        if "No readers available" in str(e) or "Reader not found" in str(e):
-            logger.warning("NFC reader may have been disconnected")
-            test_nfc_reader_availability()
+        if any(indicator in error_msg for indicator in connection_error_indicators):
+            logger.warning(f"NFC reader connectivity issue detected on {OS_NAME}: {e}")
+            logger.info("Attempting to reinitialize NFC reader...")
+            
+            # Force immediate re-test of reader availability
+            if test_nfc_reader_availability():
+                logger.info("NFC reader successfully reinitialized, retrying card read...")
+                # Try once more with the fresh reader instance
+                try:
+                    reader.connect()
+                    arr = reader.get_uid()
+                    if arr:
+                        result = ''.join(f'{x:02X}' for x in arr)
+                        logger.info(f"Card read successful after reader reinitializaion: {result}")
+                        return result
+                except Exception as retry_e:
+                    logger.debug(f"Retry after reinitialzation failed: {retry_e}")
             
         return None
 
@@ -213,12 +290,25 @@ def card_check_loop():
     
     while True:
         try:
-            # Periodically recheck reader availability (every 30 seconds)
+            # More frequent reader availability checks when reader is unavailable
             reader_check_counter += 1
-            if reader_check_counter >= 20:  # 20 * 1.5s = 30s
-                reader_check_counter = 0
-                if not nfc_reader_available:
-                    test_nfc_reader_availability()
+            
+            if not nfc_reader_available:
+                # Check every 10 seconds when reader is unavailable (more responsive)
+                if reader_check_counter >= 7:  # 7 * 1.5s ≈ 10s
+                    reader_check_counter = 0
+                    logger.info(f"Checking for NFC reader availability on {OS_NAME}...")
+                    if test_nfc_reader_availability():
+                        logger.info("✅ NFC reader is now available!")
+            else:
+                # Check every 60 seconds when reader is working (less frequent)
+                if reader_check_counter >= 40:  # 40 * 1.5s = 60s
+                    reader_check_counter = 0
+                    logger.debug("Periodic NFC reader health check...")
+                    # Just verify it's still working without full reinitialization
+                    if reader is None:
+                        logger.warning("Reader object is None, retesting availability...")
+                        test_nfc_reader_availability()
             
             if not nfc_reader_available:
                 # Skip card reading if reader is not available
@@ -558,11 +648,7 @@ def restart_application():
         logger.info("Restarting application with updated code...")
         
         # Close any open resources gracefully
-        if 'reader' in globals() and reader:
-            try:
-                reader.close()
-            except:
-                pass
+        cleanup_nfc_reader()
         
         # Try to disconnect all SocketIO clients
         try:
@@ -654,6 +740,41 @@ def handle_get_version_info():
     version_info = get_current_version()
     socketio.emit('version_info', version_info)
 
+@socketio.on('reinitialize_nfc_reader')
+def handle_reinitialize_nfc_reader():
+    """Manual NFC reader reinitialization triggered by client"""
+    logger.info("Manual NFC reader reinitialization requested")
+    
+    def reinit_reader():
+        try:
+            cleanup_nfc_reader()
+            time.sleep(1)  # Brief pause
+            success = test_nfc_reader_availability()
+            
+            socketio.emit('nfc_reader_reinit_result', {
+                'success': success,
+                'message': 'NFC-Lesegerät erfolgreich neu initialisiert' if success else 'NFC-Lesegerät Initialisierung fehlgeschlagen',
+                'os': OS_NAME
+            })
+        except Exception as e:
+            logger.error(f"Error during manual NFC reader reinitialization: {e}")
+            socketio.emit('nfc_reader_reinit_result', {
+                'success': False,
+                'message': f'Fehler bei Neuinitialisierung: {str(e)}',
+                'os': OS_NAME
+            })
+    
+    threading.Thread(target=reinit_reader, daemon=True).start()
+
+@socketio.on('get_nfc_reader_status')
+def handle_get_nfc_reader_status():
+    """Send current NFC reader status to client"""
+    socketio.emit('nfc_reader_status', {
+        'available': nfc_reader_available,
+        'reader_exists': reader is not None,
+        'os': OS_NAME
+    })
+
 if __name__ == '__main__':
     logger.info("=" * 60)
     logger.info("Starting NFC Reader Application")
@@ -688,3 +809,5 @@ if __name__ == '__main__':
         logger.error(f"Server error on {OS_NAME}: {e}")
     finally:
         logger.info("Application shutting down...")
+        cleanup_nfc_reader()
+        logger.info("Cleanup completed")

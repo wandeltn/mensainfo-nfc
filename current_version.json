@@ -1,9 +1,8 @@
 {
-  "tag_name": "v0.2.0",
-  "updated_at": "2025-10-08T08:20:17.488556",
+  "tag_name": "v0.1.1",
+  "updated_at": "2025-10-08T22:53:24.216379",
   "commit_sha": "main",
   "updated_files": [
-    "app.py",
-    "index.html"
+    "app.py"
   ]
 }
