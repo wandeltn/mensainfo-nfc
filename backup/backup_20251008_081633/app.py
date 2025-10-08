@@ -12,19 +12,11 @@ import os
 import json
 import shutil
 import sys
-import subprocess
 from datetime import datetime, timedelta
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-# OS Detection
-IS_WINDOWS = os.name == 'nt'
-IS_LINUX = os.name == 'posix'
-OS_NAME = 'Windows' if IS_WINDOWS else 'Linux/Unix' if IS_LINUX else 'Unknown'
-
-logger.info(f"Detected operating system: {OS_NAME}")
 
 # Global variables
 reader = None
@@ -121,13 +113,12 @@ def test_nfc_reader_availability():
     
     try:
         if reader is None:
-            logger.info(f"Initializing NFC reader on {OS_NAME}...")
             reader = nfc.Reader()
             
         # Try to connect to test availability
         reader.connect()
         nfc_reader_available = True
-        logger.info(f"NFC reader is available and working on {OS_NAME}")
+        logger.info("NFC reader is available and working")
         
         # Emit reader available event
         socketio.emit('nfc_reader_available')
@@ -135,21 +126,12 @@ def test_nfc_reader_availability():
         
     except Exception as e:
         nfc_reader_available = False
-        
-        # Provide OS-specific error information
-        error_context = f"NFC reader not available on {OS_NAME}: {e}"
-        if IS_WINDOWS:
-            error_context += " (Check USB drivers and permissions)"
-        elif IS_LINUX:
-            error_context += " (Check udev rules and user permissions)"
-            
-        logger.error(error_context)
+        logger.error(f"NFC reader not available: {e}")
         
         # Emit reader unavailable event
         socketio.emit('nfc_reader_unavailable', {
             'error': str(e),
-            'message': 'NFC-Lesegerät nicht erkannt',
-            'os': OS_NAME
+            'message': 'NFC-Lesegerät nicht erkannt'
         })
         return False
 
@@ -314,32 +296,26 @@ def check_for_updates():
 def backup_current_files():
     """Create backup of current files before update"""
     try:
-        # Ensure backup directory exists (cross-platform)
-        backup_dir_path = os.path.abspath(BACKUP_DIR)
-        if not os.path.exists(backup_dir_path):
-            os.makedirs(backup_dir_path, exist_ok=True)
+        if not os.path.exists(BACKUP_DIR):
+            os.makedirs(BACKUP_DIR)
         
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_subdir = os.path.join(backup_dir_path, f"backup_{timestamp}")
-        os.makedirs(backup_subdir, exist_ok=True)
+        backup_subdir = os.path.join(BACKUP_DIR, f"backup_{timestamp}")
+        os.makedirs(backup_subdir)
         
-        # Files to backup
-        files_to_backup = ['app.py', 'index.html']
-        backed_up_files = []
+        # Backup app.py
+        if os.path.exists('app.py'):
+            shutil.copy2('app.py', os.path.join(backup_subdir, 'app.py'))
         
-        for filename in files_to_backup:
-            source_path = os.path.abspath(filename)
-            if os.path.exists(source_path):
-                dest_path = os.path.join(backup_subdir, filename)
-                shutil.copy2(source_path, dest_path)
-                backed_up_files.append(filename)
-                logger.info(f"Backed up {filename} to {dest_path}")
+        # Backup index.html
+        if os.path.exists('index.html'):
+            shutil.copy2('index.html', os.path.join(backup_subdir, 'index.html'))
         
-        logger.info(f"Created backup in {backup_subdir} ({OS_NAME}) - Files: {', '.join(backed_up_files)}")
+        logger.info(f"Created backup in {backup_subdir}")
         return backup_subdir
         
     except Exception as e:
-        logger.error(f"Failed to create backup on {OS_NAME}: {e}")
+        logger.error(f"Failed to create backup: {e}")
         return None
 
 def download_release_files(release_info):
@@ -379,28 +355,18 @@ def download_release_files(release_info):
                     elif member.name.endswith('index.html'):
                         index_html_member = member
                 
-                # Extract and save the files (cross-platform)
-                temp_extract_dir = tempfile.mkdtemp()
-                
+                # Extract and save the files
                 if app_py_member:
-                    tar.extract(app_py_member, path=temp_extract_dir)
-                    extracted_app_py = os.path.join(temp_extract_dir, app_py_member.name)
-                    dest_app_py = os.path.abspath('app.py.new')
-                    shutil.move(extracted_app_py, dest_app_py)
-                    logger.info(f"Downloaded new app.py to {dest_app_py} ({OS_NAME})")
+                    tar.extract(app_py_member, path=tempfile.gettempdir())
+                    extracted_app_py = os.path.join(tempfile.gettempdir(), app_py_member.name)
+                    shutil.move(extracted_app_py, 'app.py.new')
+                    logger.info("Downloaded new app.py")
                 
                 if index_html_member:
-                    tar.extract(index_html_member, path=temp_extract_dir)
-                    extracted_index_html = os.path.join(temp_extract_dir, index_html_member.name)
-                    dest_index_html = os.path.abspath('index.html.new')
-                    shutil.move(extracted_index_html, dest_index_html)
-                    logger.info(f"Downloaded new index.html to {dest_index_html} ({OS_NAME})")
-                
-                # Clean up temp extraction directory
-                try:
-                    shutil.rmtree(temp_extract_dir)
-                except:
-                    pass
+                    tar.extract(index_html_member, path=tempfile.gettempdir())
+                    extracted_index_html = os.path.join(tempfile.gettempdir(), index_html_member.name)
+                    shutil.move(extracted_index_html, 'index.html.new')
+                    logger.info("Downloaded new index.html")
             
             # Clean up temp file
             os.unlink(tmp_path)
@@ -419,41 +385,23 @@ def apply_update(release_info):
     try:
         updated_files = []
         
-        # File replacement mapping
-        file_replacements = {
-            'app.py.new': 'app.py',
-            'index.html.new': 'index.html'
-        }
+        # Replace app.py if new version was downloaded
+        if os.path.exists('app.py.new'):
+            if os.path.exists('app.py'):
+                os.replace('app.py.new', 'app.py')
+            else:
+                os.rename('app.py.new', 'app.py')
+            updated_files.append('app.py')
+            logger.info("Updated app.py")
         
-        for new_file, target_file in file_replacements.items():
-            new_file_path = os.path.abspath(new_file)
-            target_file_path = os.path.abspath(target_file)
-            
-            if os.path.exists(new_file_path):
-                try:
-                    # Cross-platform file replacement
-                    if os.path.exists(target_file_path):
-                        if IS_WINDOWS:
-                            # On Windows, remove target first if it exists
-                            os.remove(target_file_path)
-                            shutil.move(new_file_path, target_file_path)
-                        else:
-                            # On Linux/Unix, os.replace works reliably
-                            os.replace(new_file_path, target_file_path)
-                    else:
-                        # Target doesn't exist, just rename
-                        shutil.move(new_file_path, target_file_path)
-                    
-                    updated_files.append(target_file)
-                    logger.info(f"Updated {target_file} ({OS_NAME})")
-                    
-                except Exception as e:
-                    logger.error(f"Failed to update {target_file} on {OS_NAME}: {e}")
-                    # Clean up the new file if update failed
-                    try:
-                        os.remove(new_file_path)
-                    except:
-                        pass
+        # Replace index.html if new version was downloaded
+        if os.path.exists('index.html.new'):
+            if os.path.exists('index.html'):
+                os.replace('index.html.new', 'index.html')
+            else:
+                os.rename('index.html.new', 'index.html')
+            updated_files.append('index.html')
+            logger.info("Updated index.html")
         
         if updated_files:
             # Save new version info
@@ -539,23 +487,22 @@ def schedule_restart():
         })
         
         logger.info("Initiating automatic restart...")
-        time.sleep(2)  # Longer pause to ensure messages are sent
+        time.sleep(1)  # Brief pause to ensure message is sent
         
         # Restart the Python process
         restart_application()
         
     except Exception as e:
         logger.error(f"Error during scheduled restart: {e}")
-        # Emit error notification to clients
-        socketio.emit('restart_error', {
-            'message': 'Fehler beim Neustart! Manueller Neustart erforderlich.',
-            'error': str(e)
-        })
 
 def restart_application():
     """Restart the current Python application"""
     try:
         logger.info("Restarting application with updated code...")
+        
+        # Get the current Python executable and script arguments
+        python_executable = sys.executable
+        script_path = sys.argv[0]
         
         # Close any open resources gracefully
         if 'reader' in globals() and reader:
@@ -564,72 +511,12 @@ def restart_application():
             except:
                 pass
         
-        # Try to disconnect all SocketIO clients
-        try:
-            socketio.emit('server_restart', {'message': 'Server wird neugestartet...'})
-            socketio.sleep(1)  # Give time for message to be sent
-        except:
-            pass
-        
-        # Get the current Python executable and script arguments
-        python_executable = sys.executable
-        script_args = sys.argv.copy()
-        
-        # Use different restart methods based on OS
-        logger.info(f"Restarting application on {OS_NAME}")
-        
-        if IS_WINDOWS:
-            # Windows-specific restart using subprocess
-            import subprocess
-            
-            current_dir = os.getcwd()
-            logger.info(f"Windows restart: {python_executable} {' '.join(script_args)}")
-            
-            try:
-                # Start new process with Windows-specific flags
-                subprocess.Popen(
-                    [python_executable] + script_args,
-                    cwd=current_dir,
-                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-                    close_fds=True,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
-                )
-                
-                # Give the new process time to start
-                time.sleep(3)
-                logger.info("Windows: New process started, exiting current process...")
-                os._exit(0)
-                
-            except Exception as e:
-                logger.error(f"Windows subprocess restart failed: {e}")
-                raise
-                
-        elif IS_LINUX:
-            # Linux/Unix-specific restart using execv
-            logger.info(f"Linux restart: {python_executable} {' '.join(script_args)}")
-            
-            try:
-                # Use execv for Unix systems (more reliable on Linux)
-                os.execv(python_executable, [python_executable] + script_args)
-            except Exception as e:
-                logger.error(f"Linux execv restart failed: {e}")
-                raise
-                
-        else:
-            # Fallback for other systems
-            logger.warning(f"Unknown OS ({os.name}), using fallback restart method")
-            os.execv(python_executable, [python_executable] + script_args)
+        # Restart the process
+        os.execv(python_executable, [python_executable] + sys.argv)
         
     except Exception as e:
         logger.error(f"Failed to restart application: {e}")
         logger.error("Manual restart required!")
-        # Fallback: try the old method
-        try:
-            os.execv(sys.executable, [sys.executable] + sys.argv)
-        except Exception as e2:
-            logger.error(f"Fallback restart also failed: {e2}")
 
 def update_check_loop():
     """Background thread to periodically check for updates"""
@@ -655,16 +542,11 @@ def handle_get_version_info():
     socketio.emit('version_info', version_info)
 
 if __name__ == '__main__':
-    logger.info("=" * 60)
     logger.info("Starting NFC Reader Application")
-    logger.info(f"Operating System: {OS_NAME}")
-    logger.info(f"Python Version: {sys.version}")
-    logger.info(f"Working Directory: {os.getcwd()}")
     
     # Show current version
     current_version = get_current_version()
     logger.info(f"Current version: {current_version['tag_name']}")
-    logger.info("=" * 60)
     
     # Start card monitoring thread (it will handle NFC reader initialization)
     monitoring_thread = threading.Thread(target=card_check_loop, daemon=True)
@@ -679,12 +561,4 @@ if __name__ == '__main__':
     # Start Flask-SocketIO server
     logger.info("Starting Flask server on http://0.0.0.0:5000")
     logger.info("Web interface available at: http://localhost:5000")
-    
-    try:
-        socketio.run(app, host='0.0.0.0', port=5000, allow_unsafe_werkzeug=True, debug=False)
-    except KeyboardInterrupt:
-        logger.info("Received interrupt signal, shutting down gracefully...")
-    except Exception as e:
-        logger.error(f"Server error on {OS_NAME}: {e}")
-    finally:
-        logger.info("Application shutting down...")
+    socketio.run(app, host='0.0.0.0', port=5000, allow_unsafe_werkzeug=True, debug=False)
