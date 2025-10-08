@@ -211,11 +211,20 @@
         function updateVersionDisplay(data) {
             // Update version in system status or add version info
             const versionInfo = document.getElementById('version-info');
-            if (versionInfo) {
-                versionInfo.textContent = `v${data.tag_name}`;
+            if (versionInfo && data && data.tag_name) {
+                // Remove 'v' prefix if it already exists to avoid double prefixes
+                const tagName = data.tag_name.startsWith('v') ? data.tag_name.substring(1) : data.tag_name;
+                versionInfo.textContent = `v${tagName}`;
+                console.log('Version display updated to:', versionInfo.textContent);
+            } else {
+                console.warn('Version update failed - Element or data missing:', {
+                    versionInfo: !!versionInfo,
+                    data: data,
+                    tagName: data ? data.tag_name : 'no tag_name'
+                });
             }
             
-            console.log('Current version:', data);
+            console.log('Current version data:', data);
         }
 
         function checkForUpdates() {
@@ -224,6 +233,7 @@
         }
 
         function requestVersionInfo() {
+            console.log('🚀 Requesting version info from server...');
             socket.emit('get_version_info');
         }
 
@@ -289,9 +299,12 @@
             }, 3000);
         }
 
+        // Declare socket in global scope
+        let socket;
+
         // Injected JS: WebSocket with visual feedback
         try {
-            const socket = io('ws://' + window.location.hostname + ':5000');
+            socket = io('ws://' + window.location.hostname + ':5000');
             
             socket.on('reload', () => {
                 updateStatus('Karte erkannt - Neu laden...', '#3498db', '🔄');
@@ -324,6 +337,9 @@
                 
                 updateStatus('Bereit - Bitte Karte präsentieren', '#878787', '💳');
                 updateSystemStatus('Connected', 'rgba(39, 174, 96, 0.9)', '🟢');
+                
+                // Request version info on connection
+                requestVersionInfo();
             });
 
             socket.on('disconnect', () => {
@@ -374,6 +390,8 @@
             });
 
         socket.on('version_info', function(data) {
+            console.log('📨 Received version_info event:', data);
+            console.log('🏷️  Tag name received:', data ? data.tag_name : 'no data');
             updateVersionDisplay(data);
         });
 
@@ -384,17 +402,21 @@
             updateSystemStatus('Verbindung...', 'rgba(52, 152, 219, 0.9)', '🔵');
             startConnectionTimeout();
             
-            // Request version info on connection
-            socket.on('connect', function() {
-                requestVersionInfo();
-            });
-            
         } catch (e) {
             console.error(e);
             updateStatus('Fehler bei der Initialisierung', '#e74c3c', '💥');
             updateSystemStatus('Fehler', 'rgba(231, 76, 60, 0.9)', '💥');
             clearConnectionTimeout();
         }
+        
+        // Fallback: Try to request version info after a short delay
+        setTimeout(() => {
+            if (isConnected) {
+                console.log('Fallback version info request');
+                requestVersionInfo();
+            }
+        }, 2000);
+        
         // End injected JS
     </script>
 
@@ -925,7 +947,7 @@
 <body>
     <div id="main-container">
         <div id="connection-status">🔌 System Status</div>
-        <div id="version-info" onclick="checkForUpdates()" style="position: absolute; top: 10px; left: 10px; font-size: 12px; color: #7f8c8d; cursor: pointer; opacity: 0.7; transition: opacity 0.2s;" title="Klicken Sie hier, um nach Updates zu suchen">v0.0.0</div>
+        <div id="version-info" onclick="checkForUpdates()" style="position: absolute; bottom: 10px; left: 10px; font-size: 12px; color: #7f8c8d; cursor: pointer; opacity: 0.7; transition: all 0.2s; z-index: 100; background: rgba(255, 255, 255, 0.8); padding: 4px 8px; border-radius: 4px;" title="Klicken Sie hier, um nach Updates zu suchen" onmouseover="this.style.opacity='1'; this.style.background='rgba(255, 255, 255, 1)'" onmouseout="this.style.opacity='0.7'; this.style.background='rgba(255, 255, 255, 0.8)'">v0.0.0</div>
         
         <div id="logo-container">
             <img id="company-logo" src="data:image/png;base64,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" alt="Company Logo" />

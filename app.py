@@ -13,6 +13,7 @@ import json
 import shutil
 import sys
 import subprocess
+import argparse
 from datetime import datetime, timedelta
 
 # Setup logging
@@ -60,6 +61,65 @@ UPDATE_CHECK_INTERVAL = 86400  # Check for updates every day (86400 seconds)
 VERSION_FILE = "current_version.json"
 BACKUP_DIR = "backup"
 RESTART_DELAY = 10  # Seconds to wait before restarting after app.py update
+
+# Global flags (can be modified by command line arguments)
+AUTO_UPDATE_ENABLED = True  # Default: auto-update is enabled
+
+def parse_command_line_arguments():
+    """
+    Parse command line arguments for the application
+    """
+    global AUTO_UPDATE_ENABLED
+    
+    parser = argparse.ArgumentParser(
+        description='NFC Card Reader Application with Auto-Update',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python app.py                    # Run with auto-update enabled (default)
+  python app.py --no-auto-update   # Run with auto-update disabled (for debugging)
+  python app.py --disable-updates  # Same as --no-auto-update
+        """
+    )
+    
+    # Auto-update control flags
+    update_group = parser.add_mutually_exclusive_group()
+    update_group.add_argument(
+        '--no-auto-update', '--disable-updates',
+        action='store_true',
+        help='Disable automatic updates (useful for debugging and development)'
+    )
+    update_group.add_argument(
+        '--enable-auto-update',
+        action='store_true',
+        help='Explicitly enable automatic updates (default behavior)'
+    )
+    
+    # Debug/development flags
+    parser.add_argument(
+        '--debug',
+        action='store_true',
+        help='Enable debug mode (implies --no-auto-update)'
+    )
+    
+    # Parse arguments
+    args = parser.parse_args()
+    
+    # Apply the settings
+    if args.no_auto_update or args.debug:
+        AUTO_UPDATE_ENABLED = False
+        logger.info("🚫 Auto-update disabled via command line flag")
+    elif args.enable_auto_update:
+        AUTO_UPDATE_ENABLED = True
+        logger.info("✅ Auto-update explicitly enabled via command line flag")
+    
+    # Show debug mode status
+    if args.debug:
+        logger.info("🐛 Debug mode enabled")
+        # Set logging level to DEBUG for more verbose output
+        logging.getLogger().setLevel(logging.DEBUG)
+    
+    return args
 
 def validate_card_with_database(uid):
     """
@@ -137,30 +197,30 @@ def test_nfc_reader_availability():
     global reader, nfc_reader_available
     
     try:
-        # Always create a fresh reader instance to avoid stale connections
-        old_reader = reader
-        reader = None
-        
-        # Clean up old reader if it exists
-        if old_reader is not None:
+        # Create reader instance if it doesn't exist, otherwise reuse existing one
+        if reader is None:
+            logger.info(f"Initializing NFC reader instance on {OS_NAME}...")
+            reader = nfc.Reader()
+        else:
+            # Try to use existing reader first, only recreate if it fails
+            logger.debug(f"Testing existing NFC reader instance on {OS_NAME}...")
             try:
-                old_reader.close()
-            except:
-                pass
-        
-        logger.info(f"Initializing fresh NFC reader instance on {OS_NAME}...")
-        reader = nfc.Reader()
+                reader.connect()
+                nfc_reader_available = True
+                logger.info(f"✅ Existing NFC reader is working on {OS_NAME}")
+                socketio.emit('nfc_reader_available')
+                return True
+            except Exception as existing_test_e:
+                logger.info(f"Existing reader failed, creating fresh instance: {existing_test_e}")
+                # Clean up old reader and create new one
+                try:
+                    reader.close()
+                except:
+                    pass
+                reader = nfc.Reader()
             
-        # Try to connect to test availability
+        # Try to connect to test availability (single connection test is sufficient)
         reader.connect()
-        
-        # Test if we can actually communicate with the reader
-        # by attempting to get reader info or similar non-card operation
-        try:
-            # This will throw an exception if reader is not properly connected
-            reader.connect()  # Double-check connection
-        except Exception as conn_test_e:
-            raise Exception(f"Reader connection test failed: {conn_test_e}")
         
         nfc_reader_available = True
         logger.info(f"✅ NFC reader is available and working on {OS_NAME}")
@@ -226,37 +286,25 @@ def try_connect_and_get_uid():
         error_msg = str(e).lower()
         logger.debug(f"NFC reading error on {OS_NAME}: {e}")
         
-        # Check for various connection/reader issues that indicate reader problems
-        connection_error_indicators = [
+        # Only reinitialize reader for serious connectivity issues, not normal "no card" situations
+        serious_connection_errors = [
             "no readers available",
             "reader not found", 
             "device not found",
-            "access denied",
-            "operation not supported",
-            "connection lost",
             "device disconnected",
-            "usb device not found",
-            "permission denied"
+            "usb device not found"
         ]
         
-        # Check if this is a connectivity issue that requires re-testing availability
-        if any(indicator in error_msg for indicator in connection_error_indicators):
-            logger.warning(f"NFC reader connectivity issue detected on {OS_NAME}: {e}")
+        # Check if this is a serious connectivity issue (not just no card present)
+        if any(indicator in error_msg for indicator in serious_connection_errors):
+            logger.warning(f"Serious NFC reader connectivity issue detected on {OS_NAME}: {e}")
             logger.info("Attempting to reinitialize NFC reader...")
             
             # Force immediate re-test of reader availability
-            if test_nfc_reader_availability():
-                logger.info("NFC reader successfully reinitialized, retrying card read...")
-                # Try once more with the fresh reader instance
-                try:
-                    reader.connect()
-                    arr = reader.get_uid()
-                    if arr:
-                        result = ''.join(f'{x:02X}' for x in arr)
-                        logger.info(f"Card read successful after reader reinitializaion: {result}")
-                        return result
-                except Exception as retry_e:
-                    logger.debug(f"Retry after reinitialzation failed: {retry_e}")
+            test_nfc_reader_availability()
+        else:
+            # For other errors (like no card present), just log debug info without reinitializing
+            logger.debug(f"NFC read attempt failed (likely no card present): {e}")
             
         return None
 
@@ -362,6 +410,7 @@ def get_current_version():
             return version_data
     except (FileNotFoundError, json.JSONDecodeError):
         # Default version info if file doesn't exist
+        logger.warning(f"Version file not found or invalid, using default version")
         return {
             'tag_name': 'v0.0.0',
             'updated_at': datetime.now().isoformat(),
@@ -719,9 +768,19 @@ def restart_application():
 
 def update_check_loop():
     """Background thread to periodically check for updates"""
+    if not AUTO_UPDATE_ENABLED:
+        logger.info("Auto-update is disabled, update check loop will not run")
+        return
+    
+    logger.info("Auto-update check loop started")
     while True:
         try:
-            perform_update()
+            # Double-check in case the flag was changed during runtime
+            if AUTO_UPDATE_ENABLED:
+                perform_update()
+            else:
+                logger.info("Auto-update disabled during runtime, stopping update loop")
+                break
         except Exception as e:
             logger.error(f"Error in update check loop: {e}")
         
@@ -731,14 +790,27 @@ def update_check_loop():
 @socketio.on('check_for_updates')
 def handle_check_for_updates():
     """Manual update check triggered by client"""
+    if not AUTO_UPDATE_ENABLED:
+        logger.warning("Manual update check requested, but auto-update is disabled")
+        socketio.emit('update_disabled', {
+            'message': 'Auto-Update ist deaktiviert (--no-auto-update flag aktiv)',
+            'reason': 'disabled_by_flag'
+        })
+        return
+    
     logger.info("Manual update check requested")
     threading.Thread(target=perform_update, daemon=True).start()
 
 @socketio.on('get_version_info')
 def handle_get_version_info():
     """Send current version info to client"""
+    logger.info("🔍 Client requested version info")
     version_info = get_current_version()
+    version_info['auto_update_enabled'] = AUTO_UPDATE_ENABLED
+    logger.info(f"📡 Sending version info to client: {version_info}")
+    logger.info(f"🏷️  Tag name being sent: '{version_info.get('tag_name')}'")
     socketio.emit('version_info', version_info)
+    logger.info("✅ Version info emission completed")
 
 @socketio.on('reinitialize_nfc_reader')
 def handle_reinitialize_nfc_reader():
@@ -776,11 +848,15 @@ def handle_get_nfc_reader_status():
     })
 
 if __name__ == '__main__':
+    # Parse command line arguments first
+    args = parse_command_line_arguments()
+    
     logger.info("=" * 60)
     logger.info("Starting NFC Reader Application")
     logger.info(f"Operating System: {OS_NAME}")
     logger.info(f"Python Version: {sys.version}")
     logger.info(f"Working Directory: {os.getcwd()}")
+    logger.info(f"Auto-Update: {'✅ Enabled' if AUTO_UPDATE_ENABLED else '🚫 Disabled'}")
     
     # Show current version
     current_version = get_current_version()
@@ -792,10 +868,13 @@ if __name__ == '__main__':
     monitoring_thread.start()
     logger.info("Card monitoring thread started")
     
-    # Start auto-update monitoring thread
-    update_thread = threading.Thread(target=update_check_loop, daemon=True)
-    update_thread.start()
-    logger.info("Auto-update monitoring thread started")
+    # Start auto-update monitoring thread only if auto-update is enabled
+    if AUTO_UPDATE_ENABLED:
+        update_thread = threading.Thread(target=update_check_loop, daemon=True)
+        update_thread.start()
+        logger.info("Auto-update monitoring thread started")
+    else:
+        logger.info("Auto-update monitoring thread skipped (disabled via command line flag)")
 
     # Start Flask-SocketIO server
     logger.info("Starting Flask server on http://0.0.0.0:5000")

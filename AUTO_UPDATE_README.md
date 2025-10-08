@@ -43,6 +43,34 @@ UPDATE_CHECK_INTERVAL = 3600  # Check interval in seconds (1 hour)
 RESTART_DELAY = 10  # Seconds to wait before restarting after app.py update
 ```
 
+## Command Line Options
+
+You can control the auto-update behavior using command line flags:
+
+```bash
+# Run with auto-update enabled (default behavior)
+python app.py
+
+# Disable auto-update for debugging/development
+python app.py --no-auto-update
+python app.py --disable-updates    # Alternative flag
+
+# Enable debug mode (also disables auto-update)
+python app.py --debug
+
+# Explicitly enable auto-update (useful in scripts)
+python app.py --enable-auto-update
+
+# Show help and available options
+python app.py --help
+```
+
+**For Development/Debugging:**
+
+- Use `--no-auto-update` or `--disable-updates` to prevent the app from fetching and overwriting your local changes
+- Use `--debug` for verbose logging and disabled auto-updates
+- These flags are essential when developing new features or debugging issues
+
 ## Update Process
 
 1. **Check**: Compares current version with latest GitHub release
