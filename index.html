@@ -228,8 +228,22 @@
         }
 
         function checkForUpdates() {
+            console.log('🔍 Manual update check triggered');
             socket.emit('check_for_updates');
             updateSystemStatus('Update wird geprüft...', 'rgba(52, 152, 219, 0.9)', '🔄');
+            
+            // Add a timeout fallback in case server doesn't respond
+            setTimeout(() => {
+                // Check if status is still "checking" after 30 seconds
+                const statusElement = document.getElementById('connection-status');
+                if (statusElement && statusElement.textContent.includes('Update wird geprüft')) {
+                    console.warn('Update check timeout - resetting status');
+                    updateSystemStatus('Timeout', 'rgba(231, 126, 34, 0.9)', '⏰');
+                    setTimeout(() => {
+                        updateSystemStatus('Connected', 'rgba(39, 174, 96, 0.9)', '🟢');
+                    }, 3000);
+                }
+            }, 30000); // 30 second timeout
         }
 
         function requestVersionInfo() {
@@ -397,7 +411,51 @@
 
         socket.on('restart_countdown', function(data) {
             showRestartCountdown(data);
-        });            // Initial connection attempt
+        });
+
+        socket.on('update_check_complete', function(data) {
+            console.log('📋 Update check completed:', data);
+            
+            if (data.updates_available) {
+                // Updates are available
+                updateSystemStatus(`Update verfügbar: ${data.new_version}`, 'rgba(255, 152, 0, 0.9)', '🆕');
+                
+                // Show notification about available update
+                setTimeout(() => {
+                    // Will be handled by existing update system
+                }, 1000);
+            } else {
+                // No updates available - reset status
+                updateSystemStatus('Aktuell', 'rgba(39, 174, 96, 0.9)', '✅');
+                
+                // Auto-reset status bubble after 3 seconds
+                setTimeout(() => {
+                    updateSystemStatus('Connected', 'rgba(39, 174, 96, 0.9)', '🟢');
+                }, 3000);
+            }
+        });
+
+        socket.on('update_error', function(data) {
+            console.error('❌ Update error:', data);
+            updateSystemStatus('Update Fehler', 'rgba(231, 76, 60, 0.9)', '❌');
+            
+            // Show error details briefly, then reset
+            setTimeout(() => {
+                updateSystemStatus('Connected', 'rgba(39, 174, 96, 0.9)', '🟢');
+            }, 5000);
+        });
+
+        socket.on('update_disabled', function(data) {
+            console.warn('🚫 Updates disabled:', data);
+            updateSystemStatus('Updates deaktiviert', 'rgba(231, 126, 34, 0.9)', '🚫');
+            
+            // Reset status after showing disabled message
+            setTimeout(() => {
+                updateSystemStatus('Connected', 'rgba(39, 174, 96, 0.9)', '🟢');
+            }, 4000);
+        });
+
+            // Initial connection attempt
             updateStatus('Verbindung wird hergestellt...', '#95a5a6', '⏳');
             updateSystemStatus('Verbindung...', 'rgba(52, 152, 219, 0.9)', '🔵');
             startConnectionTimeout();
