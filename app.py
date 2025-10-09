@@ -399,8 +399,9 @@ def card_check_loop():
                     
         except Exception as e:
             logger.error(f"Error in card check loop: {e}")
-            
-        time.sleep(1.5)  # Check every 1.5 seconds for more responsive detection
+
+        # Skip sleep to make loop more responsive  
+        # time.sleep(1.5)  # Check every 1.5 seconds for more responsive detection
 
 def get_current_version():
     """Get the current version from version file"""
