@@ -143,7 +143,7 @@ def validate_card_with_database(uid):
             DATABASE_URL, 
             headers=VALIDATION_HEADERS, 
             data=payload,
-            timeout=10  # 10 second timeout
+            timeout=3  # 3 second timeout for faster response
         )
         
         # Check if request was successful (2xx status codes indicate success)
@@ -246,7 +246,7 @@ def test_nfc_reader_availability():
 def try_connect_and_get_uid():
     """
     Attempt to connect to NFC reader and get card UID.
-    Simple approach similar to the old version.
+    Optimized for faster reading with persistent connection.
     
     Returns:
         str or None: Card UID in uppercase hex format, or None if no card/error
@@ -257,9 +257,9 @@ def try_connect_and_get_uid():
         # Create reader if it doesn't exist (lazy initialization like old version)
         if reader is None:
             reader = nfc.Reader()
+            reader.connect()  # Connect once during initialization
             
-        # Try to connect and get UID (similar to old version)
-        reader.connect()
+        # Try to get UID (no need to reconnect every time)
         arr = reader.get_uid()
         
         if arr:
@@ -270,9 +270,14 @@ def try_connect_and_get_uid():
             return None
             
     except Exception as e:
-        # Simple error handling like the old version
-        # If error occurs, treat as card removed/reader unavailable
+        # On error, clean up and reset connection for next attempt
         nfc_reader_available = False
+        if reader is not None:
+            try:
+                reader.close()
+            except:
+                pass
+            reader = None
         return None
 
 # Flask routes
@@ -347,7 +352,7 @@ def card_check_loop():
                 last_validation_result = None
                 socketio.emit('reload')
 
-        time.sleep(2)  # Check every 2 seconds like the old version
+        time.sleep(0)  # Check every 300ms for faster response
 
 def get_current_version():
     """Get the current version from version file"""
