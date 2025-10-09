@@ -709,11 +709,8 @@ def restart_application():
             logger.info(f"Windows restart command: {python_executable} {' '.join(script_args)}")
             
             try:
-                # Create a batch script with smart port waiting
-                restart_script = f"""
-@echo off
-echo Waiting for port 5000 to become available...
-python -c "
+                # Create a Python script for port waiting (more reliable than embedded code)
+                port_wait_script = f"""
 import socket
 import time
 import sys
@@ -727,7 +724,7 @@ def is_port_available(host='localhost', port=5000, timeout=1):
     except Exception:
         return True
 
-def wait_for_port_available(host='localhost', port=5000, max_wait_time=30, check_interval=0.5):
+def wait_for_port_available(host='localhost', port=5000, max_wait_time=60, check_interval=0.5):
     start_time = time.time()
     attempts = 0
     while time.time() - start_time < max_wait_time:
@@ -735,22 +732,42 @@ def wait_for_port_available(host='localhost', port=5000, max_wait_time=30, check
         if is_port_available(host, port):
             print(f'Port {{port}} is now available (checked {{attempts}} times)')
             return True
-        if attempts %% 4 == 0:  # Print status every 2 seconds
+        if attempts % 4 == 0:  # Print status every 2 seconds
             elapsed = int(time.time() - start_time)
             print(f'Still waiting for port {{port}}... ({{elapsed}}s elapsed)')
         time.sleep(check_interval)
     print(f'Timeout: Port {{port}} still not available after {{max_wait_time}}s')
     return False
 
-print('Checking if port 5000 is available...')
-if wait_for_port_available():
-    print('Port 5000 is available, starting new instance...')
-else:
-    print('Warning: Starting anyway after timeout')
-"
-echo Starting new instance...
-cd /d "{current_dir}"
-"{python_executable}" {' '.join(script_args)}
+if __name__ == '__main__':
+    print('Checking if port 5000 is available...')
+    if wait_for_port_available():
+        print('Port 5000 is available, starting new instance...')
+        sys.exit(0)
+    else:
+        print('Warning: Starting anyway after timeout')
+        sys.exit(0)
+"""
+                
+                # Write the port waiting Python script
+                port_wait_script_path = os.path.join(current_dir, "port_wait_temp.py")
+                with open(port_wait_script_path, 'w') as f:
+                    f.write(port_wait_script)
+                
+                # Create a batch script that uses the Python script
+                restart_script = f"""
+@echo off
+echo Waiting for port 5000 to become available...
+"{python_executable}" "{port_wait_script_path}"
+if %ERRORLEVEL% EQU 0 (
+    echo Starting new instance...
+    cd /d "{current_dir}"
+    "{python_executable}" {' '.join(script_args)}
+) else (
+    echo Port wait failed, but starting anyway...
+    cd /d "{current_dir}"
+    "{python_executable}" {' '.join(script_args)}
+)
 """
                 
                 # Write the restart script to a temporary file
@@ -771,9 +788,37 @@ cd /d "{current_dir}"
                 
                 logger.info("🚀 Windows: Delayed restart script launched, shutting down current instance...")
                 
-                # Clean exit to free up port 5000
-                time.sleep(1)  # Brief pause to ensure script is launched
-                os._exit(0)
+                # Properly exit the Flask application instead of using os._exit()
+                # This allows the Flask server to properly release the port
+                time.sleep(2)  # Brief pause to ensure script is launched
+                
+                # Initiate graceful shutdown
+                logger.info("💀 Initiating graceful Flask server shutdown...")
+                
+                # Method 1: Try to stop SocketIO server gracefully
+                try:
+                    logger.info("� Stopping SocketIO server...")
+                    socketio.stop()
+                    logger.info("✅ SocketIO server stopped successfully")
+                except Exception as e:
+                    logger.warning(f"⚠️  SocketIO stop failed: {e}")
+                
+                # Method 2: Give time for connections to close
+                time.sleep(1)
+                
+                # Method 3: Force close any remaining sockets (Windows specific)
+                try:
+                    import gc
+                    gc.collect()  # Force garbage collection to clean up sockets
+                except:
+                    pass
+                
+                # Method 4: Exit cleanly to allow OS to reclaim port
+                logger.info("🔚 Exiting application process cleanly...")
+                
+                # Use sys.exit() instead of os._exit() for cleaner shutdown
+                import sys
+                sys.exit(0)
                 
             except Exception as e:
                 logger.error(f"❌ Windows subprocess restart failed: {e}")
@@ -784,7 +829,7 @@ cd /d "{current_dir}"
             logger.info(f"Linux restart command: {python_executable} {' '.join(script_args)}")
             
             try:
-                # Create a shell script with smart port waiting
+                # Create a shell script with extended port waiting
                 current_dir = os.getcwd()
                 restart_script = f"""#!/bin/bash
 echo "Waiting for port 5000 to become available..."
@@ -802,7 +847,7 @@ def is_port_available(host='localhost', port=5000, timeout=1):
     except Exception:
         return True
 
-def wait_for_port_available(host='localhost', port=5000, max_wait_time=30, check_interval=0.5):
+def wait_for_port_available(host='localhost', port=5000, max_wait_time=60, check_interval=0.5):
     start_time = time.time()
     attempts = 0
     while time.time() - start_time < max_wait_time:
@@ -848,9 +893,34 @@ cd "{current_dir}"
                 
                 logger.info("🚀 Linux: Delayed restart script launched, shutting down current instance...")
                 
-                # Clean exit to free up port 5000
-                time.sleep(1)  # Brief pause to ensure script is launched
-                os._exit(0)
+                # Properly exit the Flask application instead of using os._exit()
+                time.sleep(2)  # Brief pause to ensure script is launched
+                
+                # Initiate graceful shutdown
+                logger.info("💀 Initiating graceful Flask server shutdown...")
+                
+                # Method 1: Try to stop SocketIO server gracefully
+                try:
+                    logger.info("� Stopping SocketIO server...")
+                    socketio.stop()
+                    logger.info("✅ SocketIO server stopped successfully")
+                except Exception as e:
+                    logger.warning(f"⚠️  SocketIO stop failed: {e}")
+                
+                # Method 2: Give time for connections to close
+                time.sleep(1)
+                
+                # Method 3: Force garbage collection to clean up sockets
+                try:
+                    import gc
+                    gc.collect()
+                except:
+                    pass
+                
+                # Method 4: Exit cleanly using sys.exit() to allow proper cleanup
+                logger.info("� Exiting application process cleanly...")
+                import sys
+                sys.exit(0)
                 
             except Exception as e:
                 logger.error(f"❌ Linux subprocess restart failed: {e}")
@@ -998,7 +1068,7 @@ def wait_for_port_available(host='localhost', port=5000, max_wait_time=30, check
 def cleanup_temporary_files():
     """Clean up temporary restart script files"""
     try:
-        temp_files = ["restart_temp.bat", "restart_temp.sh"]
+        temp_files = ["restart_temp.bat", "restart_temp.sh", "port_wait_temp.py"]
         for temp_file in temp_files:
             if os.path.exists(temp_file):
                 os.remove(temp_file)
