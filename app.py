@@ -817,7 +817,6 @@ if %ERRORLEVEL% EQU 0 (
                 logger.info("🔚 Exiting application process cleanly...")
                 
                 # Use sys.exit() instead of os._exit() for cleaner shutdown
-                import sys
                 sys.exit(0)
                 
             except Exception as e:
@@ -831,9 +830,9 @@ if %ERRORLEVEL% EQU 0 (
             try:
                 # Create a shell script with extended port waiting
                 current_dir = os.getcwd()
-                restart_script = f"""#!/bin/bash
-echo "Waiting for port 5000 to become available..."
-python3 -c "
+                
+                # Create a Python script for port waiting (consistent with Windows approach)
+                port_wait_script = f"""
 import socket
 import time
 import sys
@@ -862,15 +861,34 @@ def wait_for_port_available(host='localhost', port=5000, max_wait_time=60, check
     print(f'Timeout: Port {{port}} still not available after {{max_wait_time}}s')
     return False
 
-print('Checking if port 5000 is available...')
-if wait_for_port_available():
-    print('Port 5000 is available, starting new instance...')
-else:
-    print('Warning: Starting anyway after timeout')
-"
-echo "Starting new instance..."
-cd "{current_dir}"
-"{python_executable}" {' '.join(script_args)}
+if __name__ == '__main__':
+    print('Checking if port 5000 is available...')
+    if wait_for_port_available():
+        print('Port 5000 is available, starting new instance...')
+        sys.exit(0)
+    else:
+        print('Warning: Starting anyway after timeout')
+        sys.exit(0)
+"""
+                
+                # Write the port waiting Python script
+                port_wait_script_path = os.path.join(current_dir, "port_wait_temp.py")
+                with open(port_wait_script_path, 'w') as f:
+                    f.write(port_wait_script)
+                
+                # Create a shell script that uses the Python script
+                restart_script = f"""#!/bin/bash
+echo "Waiting for port 5000 to become available..."
+"{python_executable}" "{port_wait_script_path}"
+if [ $? -eq 0 ]; then
+    echo "Starting new instance..."
+    cd "{current_dir}"
+    "{python_executable}" {' '.join(script_args)}
+else
+    echo "Port wait failed, but starting anyway..."
+    cd "{current_dir}"
+    "{python_executable}" {' '.join(script_args)}
+fi
 """
                 
                 # Write the restart script to a temporary file
@@ -919,7 +937,6 @@ cd "{current_dir}"
                 
                 # Method 4: Exit cleanly using sys.exit() to allow proper cleanup
                 logger.info("� Exiting application process cleanly...")
-                import sys
                 sys.exit(0)
                 
             except Exception as e:
