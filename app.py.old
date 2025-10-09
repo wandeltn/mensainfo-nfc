@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+
+# --- Existing NFC code ---
+from py122u import nfc
+
+reader = nfc.Reader()
+
+
+# --- Flask server to fetch and serve HTML ---
+
+from flask import Flask, Response
+import requests
+from flask_socketio import SocketIO
+import threading
+import time
+
+app = Flask(__name__)
+socketio = SocketIO(app, cors_allowed_origins="*")
+
+url = "https://mensacheck.n-s-w.info"
+headers = {
+    'Content-Type': 'application/x-www-form-urlencoded'
+}
+
+
+@app.route('/fetch_html')
+def fetch_html():
+    try:
+        reader.connect()
+        reader.print_data(reader.get_uid())
+
+        payload_eingabe = 'eingabe='
+        print("Reading UID...")
+        arr = reader.get_uid()
+        result = ''.join(f'{x:02X}' for x in arr)
+    except Exception as e:
+        html = requests.request("GET", url).text
+        return inject_js(html)
+
+    try:
+        print("UID:", result) # Output: CA8633A2
+        payload = payload_eingabe + result
+        html = requests.request("POST", url, headers=headers, data=payload).text
+        return inject_js(html)
+    except Exception as e:
+        return f"Error fetching HTML: {e}", 500
+
+# Function to inject JS code into the first <script> tag
+def inject_js(html):
+    # Socket.IO client library script tag
+    socketio_script = '<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>'
+    js_code = """
+    // Injected JS: WebSocket reload
+    try {
+        const socket = io('ws://' + window.location.hostname + ':5000');
+        socket.on('reload', () => {
+            window.location.reload();
+        });
+    } catch (e) {}
+    // End injected JS
+    """
+    import re
+    # Always inject both scripts before </head>
+    injection = f'{socketio_script}<script>{js_code}</script>'
+    if '</head>' in html:
+        html = html.replace('</head>', f'{injection}</head>')
+    else:
+        # If no </head>, inject at the start of the document
+        html = injection + html
+    return html
+
+
+
+# --- Background card check loop ---
+last_uid = None
+def card_check_loop():
+    global last_uid
+    while True:
+        try:
+            reader.connect()
+            arr = reader.get_uid()
+            if arr:
+                uid = ''.join(f'{x:02X}' for x in arr)
+                if uid != last_uid:
+                    last_uid = uid
+                    print(f"New card detected: {uid}")
+                    socketio.emit('reload')
+            else:
+                if last_uid is not None:
+                    print("Card removed")
+                    last_uid = None
+                    socketio.emit('reload')
+        except Exception as e:
+            # If error, treat as card removed
+            if last_uid is not None:
+                print("Card removed (exception)")
+                last_uid = None
+                socketio.emit('reload')
+        time.sleep(2)  # Check every 2 seconds
+
+if __name__ == '__main__':
+    threading.Thread(target=card_check_loop, daemon=True).start()
+    socketio.run(app, host='0.0.0.0', port=5000, allow_unsafe_werkzeug=True)
