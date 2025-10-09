@@ -742,7 +742,9 @@ def wait_for_port_available(host='localhost', port=5000, max_wait_time=60, check
 if __name__ == '__main__':
     print('Checking if port 5000 is available...')
     if wait_for_port_available():
-        print('Port 5000 is available, starting new instance...')
+        print('Port 5000 is available, waiting additional 3 seconds for OS to fully release it...')
+        time.sleep(3)  # Additional delay to ensure OS fully releases the port
+        print('Ready to start new instance...')
         sys.exit(0)
     else:
         print('Warning: Starting anyway after timeout')
@@ -864,7 +866,9 @@ def wait_for_port_available(host='localhost', port=5000, max_wait_time=60, check
 if __name__ == '__main__':
     print('Checking if port 5000 is available...')
     if wait_for_port_available():
-        print('Port 5000 is available, starting new instance...')
+        print('Port 5000 is available, waiting additional 3 seconds for OS to fully release it...')
+        time.sleep(3)  # Additional delay to ensure OS fully releases the port
+        print('Ready to start new instance...')
         sys.exit(0)
     else:
         print('Warning: Starting anyway after timeout')
@@ -1125,28 +1129,79 @@ if __name__ == '__main__':
     else:
         logger.info("Auto-update monitoring thread skipped (disabled via command line flag)")
 
-    # Start Flask-SocketIO server with smart port checking
+    # Start Flask-SocketIO server with enhanced port checking
     flask_port = 5000
     
-    # Check if port is available, wait if necessary (helpful during restarts)
+    # Enhanced port availability check with longer wait time for restart scenarios
     if not is_port_available(port=flask_port):
         logger.warning(f"Port {flask_port} is currently in use. Waiting for it to become available...")
-        if wait_for_port_available(port=flask_port, max_wait_time=15):
-            logger.info(f"✅ Port {flask_port} is now available")
+        logger.info("This is normal during automatic restarts after updates...")
+        
+        # Use longer wait time to handle restart scenarios properly
+        if wait_for_port_available(port=flask_port, max_wait_time=60):
+            logger.info(f"✅ Port {flask_port} is now available after waiting")
         else:
-            logger.error(f"❌ Port {flask_port} is still not available after waiting. Attempting to start anyway...")
+            logger.error(f"❌ Port {flask_port} is still not available after 60 seconds")
+            logger.error("This may indicate another instance is still running or a system issue")
+            logger.error("Attempting to start anyway, but this may fail...")
+    else:
+        logger.debug(f"Port {flask_port} is immediately available")
     
-    logger.info(f"Starting Flask server on http://0.0.0.0:{flask_port}")
-    logger.info(f"Web interface available at: http://localhost:{flask_port}")
+    # Start Flask server with retry logic for port conflicts
+    max_startup_attempts = 5
+    startup_attempt = 0
+    server_started = False
     
-    try:
-        socketio.run(app, host='0.0.0.0', port=flask_port, allow_unsafe_werkzeug=True, debug=False)
-    except KeyboardInterrupt:
-        logger.info("Received interrupt signal, shutting down gracefully...")
-    except Exception as e:
-        logger.error(f"Server error on {OS_NAME}: {e}")
-    finally:
-        logger.info("Application shutting down...")
-        cleanup_nfc_reader()
-        cleanup_temporary_files()
-        logger.info("Cleanup completed")
+    while not server_started and startup_attempt < max_startup_attempts:
+        startup_attempt += 1
+        
+        try:
+            logger.info(f"Starting Flask server attempt {startup_attempt}/{max_startup_attempts} on http://0.0.0.0:{flask_port}")
+            logger.info(f"Web interface will be available at: http://localhost:{flask_port}")
+            
+            socketio.run(app, host='0.0.0.0', port=flask_port, allow_unsafe_werkzeug=True, debug=False)
+            server_started = True  # This line will only be reached if server starts successfully
+            
+        except KeyboardInterrupt:
+            logger.info("Received interrupt signal, shutting down gracefully...")
+            break
+            
+        except Exception as e:
+            error_msg = str(e).lower()
+            
+            # Check if this is a port-in-use error
+            if "address already in use" in error_msg or "port" in error_msg or "bind" in error_msg:
+                logger.warning(f"⚠️  Flask startup attempt {startup_attempt} failed: Port {flask_port} is in use")
+                
+                if startup_attempt < max_startup_attempts:
+                    wait_time = 10 + (startup_attempt * 5)  # Increasing wait time: 15s, 20s, 25s, 30s
+                    logger.info(f"⏳ Waiting {wait_time} seconds before retry attempt {startup_attempt + 1}...")
+                    
+                    # Wait for port to become available
+                    if wait_for_port_available(port=flask_port, max_wait_time=wait_time):
+                        logger.info(f"✅ Port {flask_port} is now available, retrying server startup...")
+                        continue
+                    else:
+                        logger.warning(f"⚠️  Port {flask_port} still not available after {wait_time}s, but trying anyway...")
+                        continue
+                else:
+                    logger.error(f"❌ Failed to start Flask server after {max_startup_attempts} attempts")
+                    logger.error(f"❌ Port {flask_port} appears to be permanently occupied")
+                    logger.error("💡 Try manually stopping any other instances of this application")
+                    break
+            else:
+                # Non-port-related error
+                logger.error(f"❌ Server error on {OS_NAME}: {e}")
+                if startup_attempt < max_startup_attempts:
+                    logger.info(f"⏳ Retrying in 5 seconds... (attempt {startup_attempt + 1}/{max_startup_attempts})")
+                    time.sleep(5)
+                    continue
+                else:
+                    logger.error(f"❌ Failed to start server after {max_startup_attempts} attempts due to errors")
+                    break
+    
+    # Final cleanup
+    logger.info("Application shutting down...")
+    cleanup_nfc_reader()
+    cleanup_temporary_files()
+    logger.info("Cleanup completed")
