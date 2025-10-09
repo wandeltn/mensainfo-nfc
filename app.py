@@ -14,6 +14,7 @@ import shutil
 import sys
 import subprocess
 import argparse
+import socket
 from datetime import datetime, timedelta
 
 # Setup logging
@@ -638,19 +639,19 @@ def schedule_restart():
         })
 
 def restart_application():
-    """Restart the current Python application"""
+    """Restart the current Python application with proper Flask shutdown"""
     try:
-        logger.info("Restarting application with updated code...")
+        logger.info("🔄 Initiating application restart with updated code...")
         
-        # Close any open resources gracefully
-        cleanup_nfc_reader()
-        
-        # Try to disconnect all SocketIO clients
+        # Notify clients about restart
         try:
             socketio.emit('server_restart', {'message': 'Server wird neugestartet...'})
             socketio.sleep(1)  # Give time for message to be sent
         except:
             pass
+        
+        # Close any open resources gracefully
+        cleanup_nfc_reader()
         
         # Get the current Python executable and script arguments
         python_executable = sys.executable
@@ -660,43 +661,161 @@ def restart_application():
         logger.info(f"Restarting application on {OS_NAME}")
         
         if IS_WINDOWS:
-            # Windows-specific restart using subprocess
+            # Windows-specific restart with delayed start
             import subprocess
             
             current_dir = os.getcwd()
-            logger.info(f"Windows restart: {python_executable} {' '.join(script_args)}")
+            logger.info(f"Windows restart command: {python_executable} {' '.join(script_args)}")
             
             try:
-                # Start new process with Windows-specific flags
+                # Create a batch script with smart port waiting
+                restart_script = f"""
+@echo off
+echo Waiting for port 5000 to become available...
+python -c "
+import socket
+import time
+import sys
+
+def is_port_available(host='localhost', port=5000, timeout=1):
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            result = sock.connect_ex((host, port))
+            return result != 0
+    except Exception:
+        return True
+
+def wait_for_port_available(host='localhost', port=5000, max_wait_time=30, check_interval=0.5):
+    start_time = time.time()
+    attempts = 0
+    while time.time() - start_time < max_wait_time:
+        attempts += 1
+        if is_port_available(host, port):
+            print(f'Port {{port}} is now available (checked {{attempts}} times)')
+            return True
+        if attempts %% 4 == 0:  # Print status every 2 seconds
+            elapsed = int(time.time() - start_time)
+            print(f'Still waiting for port {{port}}... ({{elapsed}}s elapsed)')
+        time.sleep(check_interval)
+    print(f'Timeout: Port {{port}} still not available after {{max_wait_time}}s')
+    return False
+
+print('Checking if port 5000 is available...')
+if wait_for_port_available():
+    print('Port 5000 is available, starting new instance...')
+else:
+    print('Warning: Starting anyway after timeout')
+"
+echo Starting new instance...
+cd /d "{current_dir}"
+"{python_executable}" {' '.join(script_args)}
+"""
+                
+                # Write the restart script to a temporary file
+                restart_script_path = os.path.join(current_dir, "restart_temp.bat")
+                with open(restart_script_path, 'w') as f:
+                    f.write(restart_script)
+                
+                # Start the delayed restart script
                 subprocess.Popen(
-                    [python_executable] + script_args,
+                    ["cmd", "/c", restart_script_path],
                     cwd=current_dir,
-                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
                     close_fds=True,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL
                 )
                 
-                # Give the new process time to start
-                time.sleep(3)
-                logger.info("Windows: New process started, exiting current process...")
+                logger.info("🚀 Windows: Delayed restart script launched, shutting down current instance...")
+                
+                # Clean exit to free up port 5000
+                time.sleep(1)  # Brief pause to ensure script is launched
                 os._exit(0)
                 
             except Exception as e:
-                logger.error(f"Windows subprocess restart failed: {e}")
+                logger.error(f"❌ Windows subprocess restart failed: {e}")
                 raise
                 
         elif IS_LINUX:
-            # Linux/Unix-specific restart using execv
-            logger.info(f"Linux restart: {python_executable} {' '.join(script_args)}")
+            # Linux/Unix-specific restart with delay to avoid port conflicts
+            logger.info(f"Linux restart command: {python_executable} {' '.join(script_args)}")
             
             try:
-                # Use execv for Unix systems (more reliable on Linux)
-                os.execv(python_executable, [python_executable] + script_args)
+                # Create a shell script with smart port waiting
+                current_dir = os.getcwd()
+                restart_script = f"""#!/bin/bash
+echo "Waiting for port 5000 to become available..."
+python3 -c "
+import socket
+import time
+import sys
+
+def is_port_available(host='localhost', port=5000, timeout=1):
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            result = sock.connect_ex((host, port))
+            return result != 0
+    except Exception:
+        return True
+
+def wait_for_port_available(host='localhost', port=5000, max_wait_time=30, check_interval=0.5):
+    start_time = time.time()
+    attempts = 0
+    while time.time() - start_time < max_wait_time:
+        attempts += 1
+        if is_port_available(host, port):
+            print(f'Port {{port}} is now available (checked {{attempts}} times)')
+            return True
+        if attempts % 4 == 0:  # Print status every 2 seconds
+            elapsed = int(time.time() - start_time)
+            print(f'Still waiting for port {{port}}... ({{elapsed}}s elapsed)')
+        time.sleep(check_interval)
+    print(f'Timeout: Port {{port}} still not available after {{max_wait_time}}s')
+    return False
+
+print('Checking if port 5000 is available...')
+if wait_for_port_available():
+    print('Port 5000 is available, starting new instance...')
+else:
+    print('Warning: Starting anyway after timeout')
+"
+echo "Starting new instance..."
+cd "{current_dir}"
+"{python_executable}" {' '.join(script_args)}
+"""
+                
+                # Write the restart script to a temporary file
+                restart_script_path = os.path.join(current_dir, "restart_temp.sh")
+                with open(restart_script_path, 'w') as f:
+                    f.write(restart_script)
+                
+                # Make the script executable
+                os.chmod(restart_script_path, 0o755)
+                
+                # Start the delayed restart script
+                subprocess.Popen(
+                    ["/bin/bash", restart_script_path],
+                    cwd=current_dir,
+                    start_new_session=True,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                
+                logger.info("🚀 Linux: Delayed restart script launched, shutting down current instance...")
+                
+                # Clean exit to free up port 5000
+                time.sleep(1)  # Brief pause to ensure script is launched
+                os._exit(0)
+                
             except Exception as e:
-                logger.error(f"Linux execv restart failed: {e}")
-                raise
+                logger.error(f"❌ Linux subprocess restart failed: {e}")
+                # Fallback to traditional method with a delay
+                time.sleep(3)
+                os.execv(python_executable, [python_executable] + script_args)
                 
         else:
             # Fallback for other systems
@@ -793,9 +912,65 @@ def handle_get_nfc_reader_status():
         'os': OS_NAME
     })
 
+def is_port_available(host='localhost', port=5000, timeout=1):
+    """
+    Check if a specific port is available (not in use).
+    
+    Args:
+        host (str): Host to check (default: localhost)
+        port (int): Port number to check (default: 5000)
+        timeout (int): Connection timeout in seconds
+        
+    Returns:
+        bool: True if port is available, False if in use
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            result = sock.connect_ex((host, port))
+            # If connection fails, port is available
+            return result != 0
+    except Exception:
+        # If any error occurs, assume port is available
+        return True
+
+def wait_for_port_available(host='localhost', port=5000, max_wait_time=30, check_interval=0.5):
+    """
+    Wait until a specific port becomes available.
+    
+    Args:
+        host (str): Host to check
+        port (int): Port number to check
+        max_wait_time (int): Maximum time to wait in seconds
+        check_interval (float): Time between checks in seconds
+        
+    Returns:
+        bool: True if port became available, False if timeout reached
+    """
+    start_time = time.time()
+    while time.time() - start_time < max_wait_time:
+        if is_port_available(host, port):
+            return True
+        time.sleep(check_interval)
+    return False
+
+def cleanup_temporary_files():
+    """Clean up temporary restart script files"""
+    try:
+        temp_files = ["restart_temp.bat", "restart_temp.sh"]
+        for temp_file in temp_files:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+                logger.debug(f"Cleaned up temporary file: {temp_file}")
+    except Exception as e:
+        logger.debug(f"Error cleaning temporary files: {e}")
+
 if __name__ == '__main__':
     # Parse command line arguments first
     args = parse_command_line_arguments()
+    
+    # Clean up any leftover temporary restart scripts
+    cleanup_temporary_files()
     
     logger.info("=" * 60)
     logger.info("Starting NFC Reader Application")
@@ -822,12 +997,22 @@ if __name__ == '__main__':
     else:
         logger.info("Auto-update monitoring thread skipped (disabled via command line flag)")
 
-    # Start Flask-SocketIO server
-    logger.info("Starting Flask server on http://0.0.0.0:5000")
-    logger.info("Web interface available at: http://localhost:5000")
+    # Start Flask-SocketIO server with smart port checking
+    flask_port = 5000
+    
+    # Check if port is available, wait if necessary (helpful during restarts)
+    if not is_port_available(port=flask_port):
+        logger.warning(f"Port {flask_port} is currently in use. Waiting for it to become available...")
+        if wait_for_port_available(port=flask_port, max_wait_time=15):
+            logger.info(f"✅ Port {flask_port} is now available")
+        else:
+            logger.error(f"❌ Port {flask_port} is still not available after waiting. Attempting to start anyway...")
+    
+    logger.info(f"Starting Flask server on http://0.0.0.0:{flask_port}")
+    logger.info(f"Web interface available at: http://localhost:{flask_port}")
     
     try:
-        socketio.run(app, host='0.0.0.0', port=5000, allow_unsafe_werkzeug=True, debug=False)
+        socketio.run(app, host='0.0.0.0', port=flask_port, allow_unsafe_werkzeug=True, debug=False)
     except KeyboardInterrupt:
         logger.info("Received interrupt signal, shutting down gracefully...")
     except Exception as e:
@@ -835,4 +1020,5 @@ if __name__ == '__main__':
     finally:
         logger.info("Application shutting down...")
         cleanup_nfc_reader()
+        cleanup_temporary_files()
         logger.info("Cleanup completed")
