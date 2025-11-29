@@ -132,6 +132,11 @@ Examples:
         action='store_true',
         help='Disable the pyscard fast read mode; use the default reader library only (py122u/nfcpy)'
     )
+    parser.add_argument(
+        '--kill-port',
+        action='store_true',
+        help='Attempt to kill processes that are using the Flask port before starting the server (dangerous; use with care)'
+    )
     
     # Parse arguments
     args = parser.parse_args()
@@ -1377,6 +1382,137 @@ def is_port_available(host='localhost', port=5000, timeout=1):
         # If any error occurs, assume port is available
         return True
 
+
+def _parse_netstat_windows_port_pids(port: int):
+    """Return a set of PIDs using `netstat -ano` for a given TCP port on Windows.
+    """
+    pids = set()
+    try:
+        out = subprocess.check_output(['netstat', '-ano', '-p', 'tcp'], stderr=subprocess.DEVNULL, universal_newlines=True)
+        for line in out.splitlines():
+            if f':{port} ' in line or f':{port}\r' in line:
+                parts = line.split()
+                if len(parts) >= 5:
+                    try:
+                        pid = int(parts[-1])
+                        pids.add(pid)
+                    except Exception:
+                        pass
+    except Exception as e:
+        logger.debug(f"Windows netstat failed: {e}")
+    return pids
+
+
+def _get_pids_using_port_linux(port: int):
+    """Return a set of PIDs using `lsof` or `ss` on Linux/Unix for the given port."""
+    pids = set()
+    try:
+        out = subprocess.check_output(['lsof', '-i', f':{port}'], stderr=subprocess.DEVNULL, universal_newlines=True)
+        for line in out.splitlines()[1:]:
+            parts = line.split()
+            if len(parts) >= 2:
+                try:
+                    pid = int(parts[1])
+                    pids.add(pid)
+                except Exception:
+                    pass
+        return pids
+    except Exception:
+        # fallback to ss for listening ports
+        try:
+            out = subprocess.check_output(['ss', '-ltnp'], stderr=subprocess.DEVNULL, universal_newlines=True)
+            for line in out.splitlines():
+                if f':{port} ' in line or f':{port}:' in line:
+                    # attempt to parse 'pid=1234,' pattern in the line
+                    if 'pid=' in line:
+                        try:
+                            # find substring between pid= and comma
+                            start = line.find('pid=') + 4
+                            end = line.find(',', start)
+                            if end == -1:
+                                end = len(line)
+                            pid = int(line[start:end])
+                            pids.add(pid)
+                        except Exception:
+                            pass
+        except Exception as e:
+            logger.debug(f"ss fallback failed: {e}")
+    return pids
+
+
+def get_pids_using_port(port: int):
+    """Return a list of OS PIDs using the specified TCP port (best-effort)."""
+    if IS_WINDOWS:
+        return _parse_netstat_windows_port_pids(port)
+    else:
+        return _get_pids_using_port_linux(port)
+
+
+def kill_pid(pid: int, wait: bool = False):
+    """Kill a PID cross-platform. Returns True if kill attempt was successful.
+
+    This uses 'taskkill' on Windows and 'kill' on Unix. We try polite kill first then force.
+    """
+    try:
+        if IS_WINDOWS:
+            subprocess.check_call(['taskkill', '/PID', str(pid), '/F'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        else:
+            os.kill(pid, 15)  # SIGTERM
+            if wait:
+                for _ in range(10):
+                    try:
+                        os.kill(pid, 0)
+                        time.sleep(0.1)
+                    except OSError:
+                        return True
+            return True
+    except Exception as e:
+        try:
+            # As a fallback, try to force kill
+            if not IS_WINDOWS:
+                os.kill(pid, 9)  # SIGKILL
+                return True
+        except Exception:
+            logger.debug(f"Failed to kill PID {pid}: {e}")
+        return False
+
+
+def kill_processes_using_port(port: int, exclude_current: bool = True):
+    """Attempt to kill all processes using the specified TCP port.
+
+    Returns a tuple (killed_pids, failed_pids).
+    """
+    try:
+        current_pid = os.getpid() if exclude_current else None
+        pids = get_pids_using_port(port)
+        if not pids:
+            logger.debug(f"No processes found using port {port}")
+            return ([], [])
+
+        killed = []
+        failed = []
+        logger.info(f"Found processes using port {port}: {pids}")
+        for pid in pids:
+            if exclude_current and pid == current_pid:
+                logger.info(f"Skipping own PID {pid}")
+                continue
+            try:
+                logger.info(f"Attempting to kill PID {pid} using port {port}")
+                ok = kill_pid(pid, wait=True)
+                if ok:
+                    killed.append(pid)
+                else:
+                    failed.append(pid)
+            except Exception as e:
+                failed.append(pid)
+                logger.warning(f"Failed to kill {pid}: {e}")
+
+        return (killed, failed)
+    except Exception as e:
+        logger.error(f"Error while killing processes using port {port}: {e}")
+        return ([], [])
+
 def wait_for_port_available(host='localhost', port=5000, max_wait_time=30, check_interval=0.5):
     """
     Wait until a specific port becomes available.
@@ -1464,6 +1600,15 @@ if __name__ == '__main__':
             logger.error(f"❌ Port {flask_port} is still not available after 60 seconds")
             logger.error("This may indicate another instance is still running or a system issue")
             logger.error("Attempting to start anyway, but this may fail...")
+            # If requested, try to kill processes using the port before attempting the server start
+            if hasattr(args, 'kill_port') and args.kill_port:
+                logger.info(f"Attempting to kill any process using port {flask_port} (user requested)")
+                killed, failed = kill_processes_using_port(flask_port)
+                logger.info(f"Killed PIDs: {killed}")
+                if failed:
+                    logger.warning(f"Failed to kill PIDs: {failed}")
+                # Give a brief pause for OS to reclaim the port
+                time.sleep(0.5)
     else:
         logger.debug(f"Port {flask_port} is immediately available")
     
@@ -1493,7 +1638,15 @@ if __name__ == '__main__':
             # Check if this is a port-in-use error
             if "address already in use" in error_msg or "port" in error_msg or "bind" in error_msg:
                 logger.warning(f"⚠️  Flask startup attempt {startup_attempt} failed: Port {flask_port} is in use")
-                
+                # If user requested, try to kill any processes using the port to free it up
+                if hasattr(args, 'kill_port') and args.kill_port:
+                    logger.info(f"Attempting to kill processes using port {flask_port} (user requested)")
+                    killed, failed = kill_processes_using_port(flask_port)
+                    logger.info(f"Killed PIDs: {killed}")
+                    if failed:
+                        logger.warning(f"Failed to kill PIDs: {failed}")
+                    # Wait briefly for OS to reclaim port
+                    time.sleep(0.5)
                 if startup_attempt < max_startup_attempts:
                     wait_time = 10 + (startup_attempt * 5)  # Increasing wait time: 15s, 20s, 25s, 30s
                     logger.info(f"⏳ Waiting {wait_time} seconds before retry attempt {startup_attempt + 1}...")
