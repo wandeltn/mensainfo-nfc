@@ -3,8 +3,8 @@
 # --- Enhanced NFC card validation system with auto-update ---
 from py122u import nfc
 import requests
-from flask import Flask, Response
-from flask_socketio import SocketIO
+from flask import Response
+from server import app, socketio, run_server, stop_server  # server application instance and helpers
 import threading
 import time
 import logging
@@ -31,8 +31,6 @@ logger.info(f"Detected operating system: {OS_NAME}")
 # Global variables
 reader = None
 nfc_reader_available = False
-app = Flask(__name__)
-socketio = SocketIO(app, cors_allowed_origins="*")
 
 def cleanup_nfc_reader():
     """
@@ -805,7 +803,11 @@ if %ERRORLEVEL% EQU 0 (
                 # Method 1: Try to stop SocketIO server gracefully
                 try:
                     logger.info("� Stopping SocketIO server...")
-                    socketio.stop()
+                    try:
+                        stop_server()
+                    except Exception:
+                        # Fallback to the socketio instance in case stop_server isn't supported
+                        socketio.stop()
                     logger.info("✅ SocketIO server stopped successfully")
                 except Exception as e:
                     logger.warning(f"⚠️  SocketIO stop failed: {e}")
@@ -929,7 +931,10 @@ fi
                 # Method 1: Try to stop SocketIO server gracefully
                 try:
                     logger.info("� Stopping SocketIO server...")
-                    socketio.stop()
+                    try:
+                        stop_server()
+                    except Exception:
+                        socketio.stop()
                     logger.info("✅ SocketIO server stopped successfully")
                 except Exception as e:
                     logger.warning(f"⚠️  SocketIO stop failed: {e}")
@@ -1164,7 +1169,8 @@ if __name__ == '__main__':
             logger.info(f"Starting Flask server attempt {startup_attempt}/{max_startup_attempts} on http://0.0.0.0:{flask_port}")
             logger.info(f"Web interface will be available at: http://localhost:{flask_port}")
             
-            socketio.run(app, host='0.0.0.0', port=flask_port, allow_unsafe_werkzeug=True, debug=False)
+            # Start the server managed by server.py
+            run_server(host='0.0.0.0', port=flask_port, debug=False)
             server_started = True  # This line will only be reached if server starts successfully
             
         except KeyboardInterrupt:
