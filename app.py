@@ -5,6 +5,10 @@ from py122u import nfc
 import requests
 from flask import Response
 from server import app, socketio, run_server, stop_server  # server application instance and helpers
+try:
+    import acr122u_reader
+except Exception:
+    acr122u_reader = None
 import threading
 import time
 import logging
@@ -18,7 +22,7 @@ import socket
 from datetime import datetime, timedelta
 
 # Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # OS Detection
@@ -31,6 +35,9 @@ logger.info(f"Detected operating system: {OS_NAME}")
 # Global variables
 reader = None
 nfc_reader_available = False
+# pyscard connection cache for faster reads
+pyscard_conn = None
+pyscard_reader = None
 
 def cleanup_nfc_reader():
     """
@@ -47,6 +54,17 @@ def cleanup_nfc_reader():
         finally:
             reader = None
             nfc_reader_available = False
+    # Close acr122 reader if exists
+    try:
+        global acr122_reader
+        if acr122_reader is not None:
+            try:
+                acr122_reader.close()
+            except Exception:
+                pass
+            acr122_reader = None
+    except Exception:
+        pass
 
 # Database server configuration
 DATABASE_URL = "http://mensacheck.n-s-w.info"
@@ -63,6 +81,10 @@ RESTART_DELAY = 10  # Seconds to wait before restarting after app.py update
 
 # Global flags (can be modified by command line arguments)
 AUTO_UPDATE_ENABLED = True  # Default: auto-update is enabled
+DISABLE_READER_BEEP = True
+FAST_READ_MODE = True  # Attempt fast reads using pyscard if available
+# ACR122U fast reader instance (if available)
+acr122_reader = None
 
 def parse_command_line_arguments():
     """
@@ -100,6 +122,16 @@ Examples:
         action='store_true',
         help='Enable debug mode (implies --no-auto-update)'
     )
+    parser.add_argument(
+        '--no-beep',
+        action='store_true',
+        help='Try to disable the hardware beep on the NFC reader (best-effort, vendor-specific)'
+    )
+    parser.add_argument(
+        '--no-fast-read',
+        action='store_true',
+        help='Disable the pyscard fast read mode; use the default reader library only (py122u/nfcpy)'
+    )
     
     # Parse arguments
     args = parser.parse_args()
@@ -119,6 +151,109 @@ Examples:
         logging.getLogger().setLevel(logging.DEBUG)
     
     return args
+
+
+def try_disable_reader_beep():
+    """Best-effort approach to disable reader beep. This is vendor-specific and may fail.
+
+    We try two strategies:
+    - If `smartcard` (pyscard) is available, attempt to connect and transmit a vendor APDU
+      that some readers interpret as buzzer control. These APDUs are vendor-specific.
+    - If the `py122u` reader object exposes a method to set beep/led, attempt that.
+    """
+    try:
+        from smartcard.System import readers as sc_readers
+        from smartcard.util import toHexString
+
+        r = sc_readers()
+        if r:
+            try:
+                conn = r[0].createConnection()
+                conn.connect()
+                # Best-effort: try some vendor control APDUs known to exist on some readers.
+                candidates = [
+                    # Common vendor-specific commands used by some readers (mute/unmute)
+                    [0xFF, 0x00, 0x52, 0x00, 0x00],
+                    [0xFF, 0x00, 0x52, 0x00, 0x01],
+                    [0xFF, 0x00, 0x52, 0x00, 0x02],
+                    [0xFF, 0x00, 0x52, 0x00, 0x03],
+                    # Some devices use FF 00 40 .. sequences for LED/buzzer control
+                    [0xFF, 0x00, 0x40, 0x00, 0x01],
+                ]
+
+                # If we detect ACR122 in reader name, add specific candidates
+                reader_name = str(r[0])
+                if 'ACR' in reader_name.upper() or 'ACS' in reader_name.upper():
+                    logger.info(f"Detected ACR reader: {reader_name} - trying ACR122U control APDUs")
+                    candidates += [
+                        [0xFF, 0x00, 0x51, 0x00, 0x01],
+                        [0xFF, 0x00, 0x50, 0x00, 0x00],
+                        [0xFF, 0x00, 0x50, 0x00, 0x01],
+                    ]
+
+                for apdu in candidates:
+                    try:
+                        resp, sw1, sw2 = conn.transmit(apdu)
+                        # sw1==0x90 indicates success for a lot of readers
+                        if sw1 == 0x90:
+                            logger.info(f"Reader beep control APDU sent successfully: {apdu}")
+                            try:
+                                conn.disconnect()
+                            except:
+                                pass
+                            return True
+                    except Exception:
+                        continue
+            except Exception as e:
+                logger.debug(f"pyscard control attempt failed: {e}")
+    except Exception:
+        pass
+
+    # Try acr122u wrapper first (if available and supports set_beep)
+    try:
+        global acr122u_reader
+        if acr122u_reader is not None:
+            try:
+                w = acr122u_reader.open_reader()
+                if w and hasattr(w, 'set_beep'):
+                    if w.set_beep(False):
+                        logger.info('Disabled beep via acr122u reader API')
+                        try:
+                            w.close()
+                        except Exception:
+                            pass
+                        return True
+            except Exception:
+                pass
+
+    except Exception:
+        pass
+
+    # Try py122u-specific approach (if library exposes control API)
+    try:
+        global reader
+        if reader is not None:
+            # Some py122u-based readers may have attribute methods like `set_beep` or `set_led`.
+            if hasattr(reader, 'set_beep'):
+                try:
+                    reader.set_beep(False)
+                    logger.info('Disabled beep via py122u.set_beep')
+                    return True
+                except Exception:
+                    pass
+            if hasattr(reader, 'set_led'):
+                try:
+                    reader.set_led(False)
+                    logger.info('Tried to turn off LED (may also disable beep)')
+                    return True
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    logger.info('No hardware beep control available (or operation not supported)')
+    return False
+
 
 def validate_card_with_database(uid):
     """
@@ -197,6 +332,23 @@ def test_nfc_reader_availability():
     
     try:
         # Only create reader instance if it doesn't exist (lazy initialization)
+        if acr122u_reader is not None:
+            # Try to prefer the ACR122U wrapper if available
+            try:
+                global acr122_reader
+                if acr122_reader is None:
+                    acr122_reader = acr122u_reader.open_reader()
+                if acr122_reader is not None:
+                    nfc_reader_available = True
+                    logger.debug('ACR122U reader connected successfully')
+                    try:
+                        socketio.emit('nfc_reader_available')
+                    except:
+                        pass
+                    return True
+            except Exception:
+                acr122_reader = None
+
         if reader is None:
             logger.debug(f"Creating NFC reader instance on {OS_NAME}...")
             reader = nfc.Reader()
@@ -252,6 +404,54 @@ def try_connect_and_get_uid():
     global nfc_reader_available, reader
     
     try:
+        # Fast path: try to use ACR122U (py-acr122u wrapper) if available, then pyscard
+        global acr122_reader
+        if acr122u_reader is not None:
+            try:
+                if acr122_reader is None:
+                    acr122_reader = acr122u_reader.open_reader()
+                if acr122_reader is not None:
+                    uid = acr122_reader.get_uid()
+                    if uid:
+                        nfc_reader_available = True
+                        return uid
+            except Exception:
+                acr122_reader = None
+
+        # Fast path: try to use pyscard (smartcard) API if enabled and available
+        global pyscard_conn, pyscard_reader
+        if FAST_READ_MODE:
+            try:
+                from smartcard.System import readers as sc_readers
+                from smartcard.util import toHexString
+
+                if pyscard_conn is None:
+                    sc = sc_readers()
+                    if len(sc) > 0:
+                        pyscard_reader = sc[0]
+                        pyscard_conn = pyscard_reader.createConnection()
+                        try:
+                            pyscard_conn.connect()
+                        except Exception:
+                            pyscard_conn = None
+                if pyscard_conn is not None:
+                    logger.debug('Using pyscard fast read path (smartcard)')
+                    GET_UID = [0xFF, 0xCA, 0x00, 0x00, 0x00]
+                    try:
+                        response, sw1, sw2 = pyscard_conn.transmit(GET_UID)
+                        if sw1 == 0x90 and sw2 == 0x00 and response:
+                            result = ''.join(f'{x:02X}' for x in response)
+                            nfc_reader_available = True
+                            return result
+                    except Exception:
+                        # Reset connection if transmission fails
+                        try:
+                            pyscard_conn.disconnect()
+                        except Exception:
+                            pass
+                        pyscard_conn = None
+            except Exception:
+                pass  # pyscard not available or failed, fallback to py122u
         # Create reader if it doesn't exist (lazy initialization like old version)
         if reader is None:
             reader = nfc.Reader()
@@ -294,9 +494,11 @@ last_validation_result = None
 reading_in_progress = False  # When True we are validating/processing a card
 
 # Read stability behaviour
-CARD_STABILITY_CHECKS = 2  # number of consecutive equal UID samples for stability
-CARD_STABILITY_INTERVAL = 0.05  # seconds between stability samples
+CARD_STABILITY_CHECKS = 1  # number of consecutive equal UID samples for stability (1 = faster)
+CARD_STABILITY_INTERVAL = 0.02  # seconds between stability samples (20ms)
 CARD_PROCESSING_GRACE_PERIOD = 0.6  # seconds grace to wait for transient removals
+POLL_INTERVAL = 0.3  # default polling interval
+POLL_INTERVAL_FAST = 0.08  # faster polling when pyscard is used (80ms)
 
 def card_check_loop():
     """
@@ -445,7 +647,11 @@ def card_check_loop():
                 last_validation_result = None
                 socketio.emit('reload')
 
-        time.sleep(0.3)  # Check every 300ms for faster response
+        # Poll interval may be faster if using pyscard fast mode
+        if FAST_READ_MODE:
+            time.sleep(POLL_INTERVAL_FAST)
+        else:
+            time.sleep(POLL_INTERVAL)
 
 def get_current_version():
     """Get the current version from version file"""
@@ -1205,6 +1411,15 @@ def cleanup_temporary_files():
 if __name__ == '__main__':
     # Parse command line arguments first
     args = parse_command_line_arguments()
+    # Apply new flags
+    if hasattr(args, 'no_beep') and args.no_beep:
+        DISABLE_READER_BEEP = True
+        logger.info('Attempting to disable reader beep (best-effort)')
+        # Best-effort call
+        try_disable_reader_beep()
+    if hasattr(args, 'no_fast_read') and args.no_fast_read:
+        FAST_READ_MODE = False
+        logger.info('Fast read mode disabled via CLI flag')
     
     # Clean up any leftover temporary restart scripts
     cleanup_temporary_files()

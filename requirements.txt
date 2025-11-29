@@ -1,0 +1,4 @@
+pyscard
+# Optional: ACR122U library wrappers
+py-acr122u
+acr122u
