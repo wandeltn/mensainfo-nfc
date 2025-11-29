@@ -81,6 +81,7 @@ RESTART_DELAY = 10  # Seconds to wait before restarting after app.py update
 
 # Global flags (can be modified by command line arguments)
 AUTO_UPDATE_ENABLED = True  # Default: auto-update is enabled
+DRY_RUN = False  # Simulate actions instead of actually performing them
 DISABLE_READER_BEEP = True
 FAST_READ_MODE = True  # Attempt fast reads using pyscard if available
 # ACR122U fast reader instance (if available)
@@ -136,6 +137,11 @@ Examples:
         '--kill-port',
         action='store_true',
         help='Attempt to kill processes that are using the Flask port before starting the server (dangerous; use with care)'
+    )
+    parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Simulate actions without killing processes or launching restart scripts; logs what would be done.'
     )
     
     # Parse arguments
@@ -1086,16 +1092,19 @@ if %ERRORLEVEL% EQU 0 (
                     f.write(restart_script)
                 
                 # Start the delayed restart script
-                subprocess.Popen(
-                    ["cmd", "/c", restart_script_path],
-                    cwd=current_dir,
-                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
-                    close_fds=True,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
-                )
-                
+                if DRY_RUN:
+                    logger.info(f"DRY RUN: Would launch Windows restart script: {restart_script_path}")
+                else:
+                    subprocess.Popen(
+                        ["cmd", "/c", restart_script_path],
+                        cwd=current_dir,
+                        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
+                        close_fds=True,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
+                    )
+
                 logger.info("🚀 Windows: Delayed restart script launched, shutting down current instance...")
                 
                 # Properly exit the Flask application instead of using os._exit()
@@ -1131,7 +1140,10 @@ if %ERRORLEVEL% EQU 0 (
                 logger.info("🔚 Exiting application process cleanly...")
                 
                 # Use sys.exit() instead of os._exit() for cleaner shutdown
-                sys.exit(0)
+                if DRY_RUN:
+                    logger.info("DRY RUN: Skipping process exit during restart (Windows)")
+                else:
+                    sys.exit(0)
                 
             except Exception as e:
                 logger.error(f"❌ Windows subprocess restart failed: {e}")
@@ -1216,15 +1228,18 @@ fi
                 os.chmod(restart_script_path, 0o755)
                 
                 # Start the delayed restart script
-                subprocess.Popen(
-                    ["/bin/bash", restart_script_path],
-                    cwd=current_dir,
-                    start_new_session=True,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
-                )
-                
+                if DRY_RUN:
+                    logger.info(f"DRY RUN: Would launch Linux restart script: {restart_script_path}")
+                else:
+                    subprocess.Popen(
+                        ["/bin/bash", restart_script_path],
+                        cwd=current_dir,
+                        start_new_session=True,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
+                    )
+
                 logger.info("🚀 Linux: Delayed restart script launched, shutting down current instance...")
                 
                 # Properly exit the Flask application instead of using os._exit()
@@ -1256,7 +1271,10 @@ fi
                 
                 # Method 4: Exit cleanly using sys.exit() to allow proper cleanup
                 logger.info("� Exiting application process cleanly...")
-                sys.exit(0)
+                if DRY_RUN:
+                    logger.info("DRY RUN: Skipping process exit during restart (Linux)")
+                else:
+                    sys.exit(0)
                 
             except Exception as e:
                 logger.error(f"❌ Linux subprocess restart failed: {e}")
@@ -1477,7 +1495,7 @@ def kill_pid(pid: int, wait: bool = False):
         return False
 
 
-def kill_processes_using_port(port: int, exclude_current: bool = True):
+def kill_processes_using_port(port: int, exclude_current: bool = True, dry_run: bool = False):
     """Attempt to kill all processes using the specified TCP port.
 
     Returns a tuple (killed_pids, failed_pids).
@@ -1498,6 +1516,10 @@ def kill_processes_using_port(port: int, exclude_current: bool = True):
                 continue
             try:
                 logger.info(f"Attempting to kill PID {pid} using port {port}")
+                if dry_run:
+                    logger.info(f"DRY RUN: Would kill PID: {pid}")
+                    failed.append(pid)
+                    continue
                 ok = kill_pid(pid, wait=True)
                 if ok:
                     killed.append(pid)
@@ -1546,6 +1568,10 @@ def cleanup_temporary_files():
 if __name__ == '__main__':
     # Parse command line arguments first
     args = parse_command_line_arguments()
+    # Enable dry-run globally if requested
+    if hasattr(args, 'dry_run') and args.dry_run:
+        DRY_RUN = True
+        logger.info('Dry-run mode enabled; actions will be simulated and no processes will be killed or scripts launched')
     # Apply new flags
     if hasattr(args, 'no_beep') and args.no_beep:
         DISABLE_READER_BEEP = True
@@ -1602,7 +1628,7 @@ if __name__ == '__main__':
             # If requested, try to kill processes using the port before attempting the server start
             if hasattr(args, 'kill_port') and args.kill_port:
                 logger.info(f"Attempting to kill any process using port {flask_port} (user requested)")
-                killed, failed = kill_processes_using_port(flask_port)
+                killed, failed = kill_processes_using_port(flask_port, dry_run=DRY_RUN)
                 logger.info(f"Killed PIDs: {killed}")
                 if failed:
                     logger.warning(f"Failed to kill PIDs: {failed}")
@@ -1640,7 +1666,7 @@ if __name__ == '__main__':
                 # If user requested, try to kill any processes using the port to free it up
                 if hasattr(args, 'kill_port') and args.kill_port:
                     logger.info(f"Attempting to kill processes using port {flask_port} (user requested)")
-                    killed, failed = kill_processes_using_port(flask_port)
+                    killed, failed = kill_processes_using_port(flask_port, dry_run=DRY_RUN)
                     logger.info(f"Killed PIDs: {killed}")
                     if failed:
                         logger.warning(f"Failed to kill PIDs: {failed}")
