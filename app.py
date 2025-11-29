@@ -141,7 +141,7 @@ def validate_card_with_database(uid):
             DATABASE_URL, 
             headers=VALIDATION_HEADERS, 
             data=payload,
-            timeout=3  # 3 second timeout for faster response
+            timeout=2  # 2 second timeout for faster response
         )
         
         # Check if request was successful (2xx status codes indicate success)
@@ -291,6 +291,12 @@ def fetch_html():
 
 last_uid = None
 last_validation_result = None
+reading_in_progress = False  # When True we are validating/processing a card
+
+# Read stability behaviour
+CARD_STABILITY_CHECKS = 2  # number of consecutive equal UID samples for stability
+CARD_STABILITY_INTERVAL = 0.05  # seconds between stability samples
+CARD_PROCESSING_GRACE_PERIOD = 0.6  # seconds grace to wait for transient removals
 
 def card_check_loop():
     """
@@ -312,35 +318,124 @@ def card_check_loop():
             
             if uid:
                 # New card detected
-                if uid != last_uid:
+                if uid != last_uid and not reading_in_progress:
                     last_uid = uid
-                    logger.info(f"New card detected: {uid}")
-                    
-                    # Validate card with database
-                    is_valid = validate_card_with_database(uid)
+                    logger.info(f"New card detected (pending validation): {uid}")
+
+                    # Emit 'card_processing' to tell clients to wait and hold their card
+                    reading_in_progress = True
+                    socketio.emit('card_processing', {
+                        'uid': uid,
+                        'message': 'Bitte halten Sie die Karte bis die Lesung abgeschlossen ist',
+                        'timestamp': time.time()
+                    })
+                    # Start progress with a small initial value
+                    socketio.emit('card_progress', {
+                        'uid': uid,
+                        'progress': 10,
+                    })
+
+                    # Stability sampling: ensure the UID reads stable for N checks
+                    stable = False
+                    sampled_uid = uid
+                    checks = 0
+                    start_time = time.time()
+                    while checks < CARD_STABILITY_CHECKS and (time.time() - start_time) < 1.0:
+                        time.sleep(CARD_STABILITY_INTERVAL)
+                        cur = try_connect_and_get_uid()
+                        if cur == sampled_uid:
+                            checks += 1
+                            # Update progress for each stability check
+                            progress = 10 + int(30 * (checks / float(CARD_STABILITY_CHECKS)))
+                            socketio.emit('card_progress', {
+                                'uid': sampled_uid,
+                                'progress': progress,
+                            })
+                        else:
+                            # If the card changed or was removed, update sampled_uid and reset checks
+                            sampled_uid = cur
+                            checks = 0
+                            # If removed entirely, break and treat as removal
+                            if sampled_uid is None:
+                                break
+
+                    # If the card has been removed during stability sampling, don't validate
+                    if sampled_uid is None:
+                        logger.info("Card removed during processing stability checks")
+                        reading_in_progress = False
+                        # Emit a 'card_processing_cancelled' event so UI can update accordingly
+                        socketio.emit('card_processing_cancelled', {
+                            'message': 'Karte entfernt - Bitte erneut halten',
+                            'timestamp': time.time()
+                        })
+                        socketio.emit('card_progress', {
+                            'uid': uid,
+                            'progress': 0,
+                        })
+                        # Keep last_uid None so the next detection is treated freshly
+                        last_uid = None
+                        continue
+
+                    # Continue with validation for the stable UID
+                    socketio.emit('card_progress', {
+                        'uid': sampled_uid,
+                        'progress': 60,
+                    })
+                    is_valid = validate_card_with_database(sampled_uid)
+                    # Emit progress that validation finished
+                    socketio.emit('card_progress', {
+                        'uid': sampled_uid,
+                        'progress': 100,
+                    })
                     last_validation_result = is_valid
                     
                     if is_valid:
-                        logger.info(f"Card {uid} is VALID")
+                        logger.info(f"Card {sampled_uid} is VALID")
                         socketio.emit('card_success', {
-                            'uid': uid,
+                            'uid': sampled_uid,
                             'message': 'Karte berechtigt',
                             'timestamp': time.time()
                         })
                     else:
-                        logger.warning(f"Card {uid} is INVALID")
+                        logger.warning(f"Card {sampled_uid} is INVALID")
                         socketio.emit('card_unauthorized', {
-                            'uid': uid,
+                            'uid': sampled_uid,
                             'message': 'Karte nicht berechtigt',
                             'timestamp': time.time()
                         })
+
+                    reading_in_progress = False
             else:
                 # Card removed or no card present
-                if last_uid is not None:
+                if last_uid is not None and not reading_in_progress:
                     logger.info(f"Card {last_uid} removed")
                     last_uid = None
                     last_validation_result = None
                     socketio.emit('reload')
+                elif last_uid is not None and reading_in_progress:
+                    # Card was removed during processing: wait for grace period before treating removal
+                    grace_start = time.time()
+                    while time.time() - grace_start < CARD_PROCESSING_GRACE_PERIOD:
+                        time.sleep(CARD_STABILITY_INTERVAL)
+                        cur = try_connect_and_get_uid()
+                        if cur is not None:
+                            break
+                    # After grace, if still no card, cancel reading and notify UI
+                    cur = try_connect_and_get_uid()
+                    if cur is None:
+                        logger.info("Card removed during processing grace period")
+                        # Cancel processing if needed
+                        reading_in_progress = False
+                        last_uid = None
+                        last_validation_result = None
+                        socketio.emit('card_processing_cancelled', {
+                            'message': 'Karte entfernt - Bitte erneut halten',
+                            'timestamp': time.time()
+                        })
+                        socketio.emit('card_progress', {
+                            'uid': last_uid,
+                            'progress': 0,
+                        })
                     
         except Exception as e:
             # Simple error handling like old version
@@ -350,7 +445,7 @@ def card_check_loop():
                 last_validation_result = None
                 socketio.emit('reload')
 
-        time.sleep(0)  # Check every 300ms for faster response
+        time.sleep(0.3)  # Check every 300ms for faster response
 
 def get_current_version():
     """Get the current version from version file"""
