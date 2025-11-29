@@ -1012,7 +1012,6 @@ def restart_application():
         
         if IS_WINDOWS:
             # Windows-specific restart with delayed start
-            import subprocess
             
             current_dir = os.getcwd()
             logger.info(f"Windows restart command: {python_executable} {' '.join(script_args)}")
