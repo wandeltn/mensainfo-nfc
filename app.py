@@ -9,10 +9,7 @@ except Exception:
 import requests
 from flask import Response
 from server import app, socketio, run_server, stop_server  # server application instance and helpers
-try:
-    import acr122u_reader
-except Exception:
-    acr122u_reader = None
+# ACR122U wrapper removed — we no longer use the optional acr122u_reader
 import threading
 import time
 import logging
@@ -39,9 +36,7 @@ logger.info(f"Detected operating system: {OS_NAME}")
 # Global variables
 reader = None
 nfc_reader_available = False
-# pyscard connection cache for faster reads
-pyscard_conn = None
-pyscard_reader = None
+# pyscard fast-path removed — not used by default
 
 def cleanup_nfc_reader():
     """
@@ -58,17 +53,7 @@ def cleanup_nfc_reader():
         finally:
             reader = None
             nfc_reader_available = False
-    # Close acr122 reader if exists
-    try:
-        global acr122_reader
-        if acr122_reader is not None:
-            try:
-                acr122_reader.close()
-            except Exception:
-                pass
-            acr122_reader = None
-    except Exception:
-        pass
+    # No ACR122U wrapper to close (we run py122u-only)
 
 # Database server configuration
 DATABASE_URL = "http://mensacheck.n-s-w.info"
@@ -87,15 +72,8 @@ RESTART_DELAY = 10  # Seconds to wait before restarting after app.py update
 AUTO_UPDATE_ENABLED = True  # Default: auto-update is enabled
 DRY_RUN = False  # Simulate actions instead of actually performing them
 DISABLE_READER_BEEP = True
-FAST_READ_MODE = True  # Attempt fast reads using pyscard if available
-# ACR122U fast reader instance (if available)
-acr122_reader = None
-# Retry/backoff for ACR122U open attempts (to avoid repeated imports/log spam)
-ACR122U_RETRY_INTERVAL = 5  # seconds between open attempts when fails
-acr122u_last_attempt = None
-# Track successive acr122u read failures and temporarily disable on multiple consecutive failures
-ACR122U_MAX_FAILS = 3
-acr122u_fail_count = 0
+FAST_READ_MODE = False  # Fast-read-disabled by default - revert to py122u behavior
+# ACR122U support removed — we rely on py122u Reader only
 
 def parse_command_line_arguments():
     """
@@ -138,11 +116,7 @@ Examples:
         action='store_true',
         help='Try to disable the hardware beep on the NFC reader (best-effort, vendor-specific)'
     )
-    parser.add_argument(
-        '--no-fast-read',
-        action='store_true',
-        help='Disable the pyscard fast read mode; use the default reader library only (py122u/nfcpy)'
-    )
+    # Fast-read support removed; py122u is used by default
     parser.add_argument(
         '--kill-port',
         action='store_true',
@@ -230,25 +204,7 @@ def try_disable_reader_beep():
     except Exception:
         pass
 
-    # Try acr122u wrapper first (if available and supports set_beep)
-    try:
-        global acr122u_reader
-        if acr122u_reader is not None:
-            try:
-                w = acr122u_reader.open_reader()
-                if w and hasattr(w, 'set_beep'):
-                    if w.set_beep(False):
-                        logger.info('Disabled beep via acr122u reader API')
-                        try:
-                            w.close()
-                        except Exception:
-                            pass
-                        return True
-            except Exception:
-                pass
-
-    except Exception:
-        pass
+    # ACR122U wrapper removed — fall back to py122u or pyscard control paths only
 
     # Try py122u-specific approach (if library exposes control API)
     try:
@@ -353,29 +309,6 @@ def test_nfc_reader_availability():
     
     try:
         # Only create reader instance if it doesn't exist (lazy initialization)
-        if acr122u_reader is not None:
-            # Try to prefer the ACR122U wrapper if available
-            try:
-                global acr122_reader, acr122u_last_attempt
-                now = time.time()
-                # Try to open once, and on failure, only retry after backoff
-                if acr122_reader is None:
-                    if acr122u_last_attempt is None or (now - acr122u_last_attempt) >= ACR122U_RETRY_INTERVAL:
-                        acr122u_last_attempt = now
-                        acr122_reader = acr122u_reader.open_reader()
-                    else:
-                        # Skip trying to open to avoid repeated imports/logging
-                        logger.debug('Skipping ACR122U open attempt (backoff active)')
-                if acr122_reader is not None:
-                    nfc_reader_available = True
-                    logger.debug('ACR122U reader connected successfully')
-                    try:
-                        socketio.emit('nfc_reader_available')
-                    except:
-                        pass
-                    return True
-            except Exception:
-                acr122_reader = None
 
         if reader is None:
             if nfc is None:
@@ -433,98 +366,25 @@ def try_connect_and_get_uid():
         str or None: Card UID in uppercase hex format, or None if no card/error
     """
     global nfc_reader_available, reader
-    
     try:
-        # Fast path: try to use ACR122U (py-acr122u wrapper) if available, then pyscard
-        global acr122_reader, acr122u_last_attempt
-        if acr122u_reader is not None:
-            try:
-                now = time.time()
-                if acr122_reader is None:
-                    # Only attempt to open after backoff to avoid repeated imports/logging
-                    if acr122u_last_attempt is None or (now - acr122u_last_attempt) >= ACR122U_RETRY_INTERVAL:
-                        acr122u_last_attempt = now
-                        acr122_reader = acr122u_reader.open_reader()
-                    else:
-                        logger.debug('Skipping ACR122U open attempt in try_connect_and_get_uid (backoff active)')
-                if acr122_reader is not None:
-                    uid = acr122_reader.get_uid()
-                    logger.debug(f'ACR122U wrapper get_uid returned: {uid}')
-                    global acr122u_fail_count
-                    if uid:
-                        nfc_reader_available = True
-                        acr122u_fail_count = 0
-                        return uid
-                    else:
-                        # Track failures and disable acr122_reader on repeated failures
-                        try:
-                            acr122u_fail_count += 1
-                        except Exception:
-                            acr122u_fail_count = 1
-                        if acr122u_fail_count >= ACR122U_MAX_FAILS:
-                            logger.warning(f'ACR122U reader failing for {acr122u_fail_count} reads; disabling temporarily')
-                            try:
-                                acr122_reader.close()
-                            except Exception:
-                                pass
-                            acr122_reader = None
-                            # set last attempt to now so backoff is in effect
-                            acr122u_last_attempt = time.time()
-            except Exception:
-                acr122_reader = None
-
-        # Fast path: try to use pyscard (smartcard) API if enabled and available
-        global pyscard_conn, pyscard_reader
-        if FAST_READ_MODE:
-            try:
-                from smartcard.System import readers as sc_readers
-                from smartcard.util import toHexString
-
-                if pyscard_conn is None:
-                    sc = sc_readers()
-                    if len(sc) > 0:
-                        pyscard_reader = sc[0]
-                        pyscard_conn = pyscard_reader.createConnection()
-                        try:
-                            pyscard_conn.connect()
-                        except Exception:
-                            pyscard_conn = None
-                    if pyscard_conn is not None:
-                        logger.debug('Using pyscard fast read path (smartcard)')
-                    GET_UID = [0xFF, 0xCA, 0x00, 0x00, 0x00]
-                    try:
-                        response, sw1, sw2 = pyscard_conn.transmit(GET_UID)
-                        if sw1 == 0x90 and sw2 == 0x00 and response:
-                            result = ''.join(f'{x:02X}' for x in response)
-                            nfc_reader_available = True
-                            return result
-                    except Exception:
-                        # Reset connection if transmission fails
-                        try:
-                            pyscard_conn.disconnect()
-                        except Exception:
-                            pass
-                        pyscard_conn = None
-            except Exception:
-                pass  # pyscard not available or failed, fallback to py122u
-        # Create reader if it doesn't exist (lazy initialization like old version)
-        if reader is None and nfc is not None:
+        # Reverted to a simpler, original py122u-only path: avoid ACR and pyscard fast-path
+        if reader is None:
+            if nfc is None:
+                logger.debug('py122u nfc.Reader unavailable, skipping creation')
+                return None
             reader = nfc.Reader()
             try:
-                reader.connect()  # Connect once during initialization
+                reader.connect()
             except Exception:
                 pass
-            
-        # Try to get UID (no need to reconnect every time)
-        logger.debug('Using py122u nfc.Reader get_uid path')
+
+        logger.debug('Using py122u nfc.Reader get_uid path (reverted)')
         arr = reader.get_uid()
-        
         if arr:
             result = ''.join(f'{x:02X}' for x in arr)
             nfc_reader_available = True
             return result
-        else:
-            return None
+        return None
             
     except Exception as e:
         # On error, clean up and reset connection for next attempt
@@ -557,7 +417,6 @@ CARD_STABILITY_CHECKS = 1  # number of consecutive equal UID samples for stabili
 CARD_STABILITY_INTERVAL = 0.02  # seconds between stability samples (20ms)
 CARD_PROCESSING_GRACE_PERIOD = 0.6  # seconds grace to wait for transient removals
 POLL_INTERVAL = 0.3  # default polling interval
-POLL_INTERVAL_FAST = 0.08  # faster polling when pyscard is used (80ms)
 
 def card_check_loop():
     """
@@ -706,11 +565,8 @@ def card_check_loop():
                 last_validation_result = None
                 socketio.emit('reload')
 
-        # Poll interval may be faster if using pyscard fast mode
-        if FAST_READ_MODE:
-            time.sleep(POLL_INTERVAL_FAST)
-        else:
-            time.sleep(POLL_INTERVAL)
+        # Reverted to simple polling interval
+        time.sleep(POLL_INTERVAL)
 
 def get_current_version():
     """Get the current version from version file"""
@@ -1626,9 +1482,7 @@ if __name__ == '__main__':
         logger.info('Attempting to disable reader beep (best-effort)')
         # Best-effort call
         try_disable_reader_beep()
-    if hasattr(args, 'no_fast_read') and args.no_fast_read:
-        FAST_READ_MODE = False
-        logger.info('Fast read mode disabled via CLI flag')
+    # No fast-read flag available (py122u-only behavior)
     
     # Clean up any leftover temporary restart scripts
     cleanup_temporary_files()

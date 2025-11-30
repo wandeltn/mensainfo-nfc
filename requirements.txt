@@ -1,4 +1,1 @@
-pyscard
-# Optional: ACR122U library wrappers
-py-acr122u
-acr122u
+# Keep requirements minimal - revert to original py122u-only behavior
