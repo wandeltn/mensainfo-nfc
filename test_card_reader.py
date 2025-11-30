@@ -49,10 +49,23 @@ def try_import_libnfc_reader():
         return None
 
 
+def try_import_nfcpy():
+    try:
+        import nfc
+        from nfc import ContactlessFrontend
+        return nfc, ContactlessFrontend
+    except Exception as e:
+        logger.debug(f"Could not import nfcpy module: {e}")
+        return None, None
+
+
 def main_run(args):
     appmod = try_import_app_helpers()
     mainmod = try_import_main_reader()
     libnfcmod = try_import_libnfc_reader()
+    nfcpy_mod, nfcpy_cf = try_import_nfcpy()
+    nfcpy_enabled = args.nfcpy
+    nfcpy_timeout = args.nfcpy_timeout
 
     if appmod is None:
         logger.error("Aborting: app module not importable")
@@ -118,6 +131,49 @@ def main_run(args):
             except Exception as e:
                 logger.debug(f"Attempt {attempt} libnfc read error: {e}")
 
+        # nfcpy detection: try to construct ContactlessFrontend and optionally read if enabled
+        if nfcpy_cf is not None:
+            try:
+                clf = None
+                try:
+                    clf = nfcpy_cf('usb')
+                except Exception:
+                    # Some environments may auto-detect without 'usb' arg
+                    try:
+                        clf = nfcpy_cf()
+                    except Exception:
+                        clf = None
+                if clf:
+                    logger.info(f"Attempt {attempt}: nfcpy ContactlessFrontend opened: {clf}")
+                    if nfcpy_enabled:
+                        # Attempt a non-blocking read using rdwr with a terminate timeout
+                        uid_container = {'uid': None}
+                        def on_connect(tag):
+                            try:
+                                uid_container['uid'] = getattr(tag, 'identifier', None)
+                                if uid_container['uid'] is not None:
+                                    uid_container['uid'] = uid_container['uid'].hex().upper()
+                                else:
+                                    uid_container['uid'] = str(tag)
+                            except Exception:
+                                uid_container['uid'] = str(tag)
+                            return False  # stop after one tag
+                        start = time.time()
+                        try:
+                            clf.connect(rdwr={'on-connect': on_connect}, terminate=lambda: time.time() - start > nfcpy_timeout)
+                        except Exception:
+                            pass
+                        if uid_container['uid']:
+                            logger.info(f"Attempt {attempt}: nfcpy read UID: {uid_container['uid']}")
+                    try:
+                        clf.close()
+                    except Exception:
+                        pass
+                else:
+                    logger.debug(f"Attempt {attempt}: nfcpy did not find a reader")
+            except Exception as e:
+                logger.debug(f"Attempt {attempt} nfcpy detection error: {e}")
+
         time.sleep(args.interval)
 
     total_elapsed = time.time() - start_time
@@ -137,6 +193,8 @@ if __name__ == '__main__':
     parser.add_argument('--attempts', type=int, default=10, help='Number of read attempts (default 10)')
     parser.add_argument('--interval', type=float, default=0.5, help='Interval between attempts in seconds (default 0.5)')
     parser.add_argument('--verbose', action='store_true', help='Enable debug-level output')
+    parser.add_argument('--nfcpy', action='store_true', help='Enable nfcpy read attempts if nfcpy is installed')
+    parser.add_argument('--nfcpy-timeout', type=float, default=0.5, help='nfcpy read timeout in seconds (default 0.5)')
     args = parser.parse_args()
 
     if args.verbose:
