@@ -416,6 +416,39 @@
                 }
             });
 
+            // New handler: server-side indicates the card is validated (network check in progress)
+            socket.on('card_validating', (msg) => {
+                console.log('Card validating:', msg);
+                // Keep the processing visuals, but change the message and color to indicate network validation
+                isProcessing = true;
+                updateStatus('Karte wird validiert - Bitte warten', '#3498db', '🔁', false, 0, false);
+                const container = document.getElementById('main-container');
+                container.classList.add('processing');
+                const cardStatus = document.getElementById('card-status');
+                const cardMessage = document.getElementById('card-message');
+                cardMessage.textContent = msg.message || 'Validierung läuft...';
+                cardStatus.style.display = 'block';
+                cardStatus.className = 'card-status processing';
+                showProgressBar();
+                setProgress(70);
+            });
+
+            socket.on('card_validation_error', (msg) => {
+                console.error('Card validation error:', msg);
+                isProcessing = false;
+                const container = document.getElementById('main-container');
+                container.classList.remove('processing');
+                const cardStatus = document.getElementById('card-status');
+                cardStatus.style.display = 'none';
+                showCardEvent('Validierungsfehler beim Server', false);
+                updateStatus('Validierungsfehler', '#e74c3c', '❌', true, 5000);
+                hideProgressBar();
+                if (typeof window._progressSimulationInterval !== 'undefined') {
+                    clearInterval(window._progressSimulationInterval);
+                    window._progressSimulationInterval = undefined;
+                }
+            });
+
             socket.on('card_processing_cancelled', (msg) => {
                 console.log('Card processing cancelled:', msg);
                 // Remove processing visuals and revert to ready if appropriate

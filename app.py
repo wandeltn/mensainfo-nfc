@@ -259,36 +259,31 @@ def try_disable_reader_beep():
 def validate_card_with_database(uid):
     """
     Validate NFC card UID with the external database server.
-    Checks for "Erfolgreich gespeichert!" in the response to determine validity.
     
     Args:
         uid (str): The card UID in hex format
         
     Returns:
-        bool: True if card is valid (response contains "Erfolgreich gespeichert!"), False otherwise
+        bool: True if card is valid, False otherwise
     """
     try:
         # Prepare the form data
         payload = f'eingabe={uid}'
         
         logger.info(f"Validating card UID: {uid}")
-        logger.debug(f"Sending POST to {DATABASE_URL} with payload: {payload}")
         
         # Send POST request to database server
         response = requests.post(
             DATABASE_URL, 
             headers=VALIDATION_HEADERS, 
             data=payload,
-            timeout=2  # 2 second timeout for faster response
+            timeout=3  # 3 second timeout for faster response
         )
         
-        logger.debug(f"Response status: {response.status_code}")
-        logger.debug(f"Response text: {response.text}")
+        # Check if request was successful (2xx status codes indicate success)
+        is_valid = 200 <= response.status_code < 300
         
-        # Check if the response contains the success message
-        is_valid = "Erfolgreich gespeichert!" in response.text
-        
-        logger.info(f"Card {uid} validation result: {'VALID' if is_valid else 'INVALID'}")
+        logger.info(f"Card {uid} validation result: {'VALID' if is_valid else 'INVALID'} (Status: {response.status_code})")
         
         return is_valid
         
@@ -456,6 +451,88 @@ last_uid = None
 last_validation_result = None
 reading_in_progress = False  # When True we are validating/processing a card
 
+# pending_validations maps UID to a threading.Event used to cancel a background
+# validation if the card is removed before validation completes.
+pending_validations = {}
+pending_validations_lock = threading.Lock()
+
+
+def validate_card_async(uid: str, cancel_event: threading.Event):
+    """
+    Run card validation in a background thread to avoid blocking the main polling loop.
+    If cancel_event is set during the procedure, the function will abort without emitting result events.
+    """
+    try:
+        logger.info(f"Background validation started for {uid}")
+        # Inform clients the validation is now in progress (distinct from 'processing')
+        try:
+            socketio.emit('card_validating', {
+                'uid': uid,
+                'message': 'Karte wird validiert',
+                'timestamp': time.time()
+            }, broadcast=True)
+        except Exception:
+            pass
+
+        # Show progress update
+        try:
+            socketio.emit('card_progress', {'uid': uid, 'progress': 70}, broadcast=True)
+        except Exception:
+            pass
+
+        # Run validation (blocking network call) - validate_card_with_database has its own timeout
+        is_valid = validate_card_with_database(uid)
+
+        # If the cancel event was set during the call, abort and do not emit a final outcome
+        if cancel_event.is_set():
+            logger.info(f"Validation cancelled for {uid}")
+            try:
+                socketio.emit('card_processing_cancelled', {
+                    'uid': uid,
+                    'message': 'Validierung abgebrochen (Karte entfernt)'
+                }, broadcast=True)
+            except Exception:
+                pass
+            return
+
+        # Final progress
+        try:
+            socketio.emit('card_progress', {'uid': uid, 'progress': 100}, broadcast=True)
+        except Exception:
+            pass
+
+        # Emit final result
+        if is_valid:
+            logger.info(f"Card {uid} validated (async)")
+            try:
+                socketio.emit('card_success', {'uid': uid, 'message': 'Karte berechtigt'}, broadcast=True)
+            except Exception:
+                pass
+        else:
+            logger.warning(f"Card {uid} invalid (async)")
+            try:
+                socketio.emit('card_unauthorized', {'uid': uid, 'message': 'Karte nicht berechtigt'}, broadcast=True)
+            except Exception:
+                pass
+
+    except Exception as e:
+        logger.error(f"Error in background validation for {uid}: {e}")
+        try:
+            socketio.emit('card_validation_error', {'uid': uid, 'message': str(e)}, broadcast=True)
+        except Exception:
+            pass
+    finally:
+        # Clean up pending validation entry and leave a small grace before allowing new reads
+        with pending_validations_lock:
+            try:
+                pending_validations.pop(uid, None)
+            except Exception:
+                pass
+        # Ensure the reading flag is cleared so new cards can be processed
+        global reading_in_progress, last_uid
+        reading_in_progress = False
+        last_uid = None
+
 # Read stability behaviour
 CARD_STABILITY_CHECKS = 1  # number of consecutive equal UID samples for stability (1 = faster)
 CARD_STABILITY_INTERVAL = 0.02  # seconds between stability samples (20ms)
@@ -532,6 +609,11 @@ def card_check_loop():
                             'message': 'Karte entfernt - Bitte erneut halten',
                             'timestamp': time.time()
                         })
+                        # Signal any ongoing background validation to cancel
+                        with pending_validations_lock:
+                            cancel_event = pending_validations.get(uid)
+                        if cancel_event:
+                            cancel_event.set()
                         socketio.emit('card_progress', {
                             'uid': uid,
                             'progress': 0,
@@ -540,39 +622,28 @@ def card_check_loop():
                         last_uid = None
                         continue
 
-                    # Continue with validation for the stable UID
+                    # Continue with validation for the stable UID, but do it asynchronously
                     socketio.emit('card_progress', {
                         'uid': sampled_uid,
                         'progress': 60,
                     })
-                    is_valid = validate_card_with_database(sampled_uid)
-                    # Emit progress that validation finished
-                    socketio.emit('card_progress', {
-                        'uid': sampled_uid,
-                        'progress': 100,
-                    })
-                    last_validation_result = is_valid
-                    
-                    if is_valid:
-                        logger.info(f"Card {sampled_uid} is VALID")
-                        socketio.emit('card_success', {
-                            'uid': sampled_uid,
-                            'message': 'Karte berechtigt',
-                            'timestamp': time.time()
-                        }, broadcast=True)
-                    else:
-                        logger.warning(f"Card {sampled_uid} is INVALID")
-                        socketio.emit('card_unauthorized', {
-                            'uid': sampled_uid,
-                            'message': 'Karte nicht berechtigt',
-                            'timestamp': time.time()
-                        }, broadcast=True)
-
-                    reading_in_progress = False
+                    # If no existing validation is pending for this UID, start a background validator
+                    with pending_validations_lock:
+                        if sampled_uid not in pending_validations:
+                            cancel_event = threading.Event()
+                            pending_validations[sampled_uid] = cancel_event
+                            logger.debug(f"Spawning async validation thread for UID {sampled_uid}")
+                            t = threading.Thread(target=validate_card_async, args=(sampled_uid, cancel_event), daemon=True)
+                            t.start()
             else:
                 # Card removed or no card present
                 if last_uid is not None and not reading_in_progress:
                     logger.info(f"Card {last_uid} removed")
+                    # If a pending validation exists for this UID, cancel it
+                    with pending_validations_lock:
+                        cancel_event = pending_validations.get(last_uid) if last_uid else None
+                    if cancel_event:
+                        cancel_event.set()
                     last_uid = None
                     last_validation_result = None
                     socketio.emit('reload')
@@ -590,6 +661,15 @@ def card_check_loop():
                         logger.info("Card removed during processing grace period")
                         # Cancel processing if needed
                         reading_in_progress = False
+                        # Signal any ongoing background validation to cancel
+                        with pending_validations_lock:
+                            cancel_event = None
+                            try:
+                                cancel_event = pending_validations.get(last_uid)
+                            except Exception:
+                                cancel_event = None
+                        if cancel_event:
+                            cancel_event.set()
                         last_uid = None
                         last_validation_result = None
                         socketio.emit('card_processing_cancelled', {
@@ -605,6 +685,11 @@ def card_check_loop():
             # Simple error handling like old version
             if last_uid is not None:
                 logger.info("Card removed (exception)")
+                # Cancel any pending validation for this UID
+                with pending_validations_lock:
+                    cancel_event = pending_validations.get(last_uid) if last_uid else None
+                if cancel_event:
+                    cancel_event.set()
                 last_uid = None
                 last_validation_result = None
                 socketio.emit('reload')
