@@ -473,6 +473,68 @@
                 }
             });
 
+            socket.on('card_validation_offline', (msg) => {
+                console.warn('Card validation offline:', msg);
+                // Treat as a special case: backend/service unreachable
+                isProcessing = false;
+                const container = document.getElementById('main-container');
+                container.classList.remove('processing');
+                // Use an orange status to differentiate from a straight error
+                showCardEvent('Validierungsdienst nicht erreichbar – bitte Netzwerk prüfen', false);
+                // mark the card status as coming from backend offline state
+                const cardStatus = document.getElementById('card-status');
+                cardStatus.dataset.source = 'backend_offline';
+                updateStatus('Validierungsdienst nicht erreichbar', '#e67e22', '⚠️', true, 6000);
+                // Keep the progress bar in a state that shows activity or stop it
+                setProgress(100);
+                hideProgressBar();
+                if (typeof window._progressSimulationInterval !== 'undefined') {
+                    clearInterval(window._progressSimulationInterval);
+                    window._progressSimulationInterval = undefined;
+                }
+            });
+
+            socket.on('card_validation_online', (msg) => {
+                console.log('Validation backend reachable again:', msg);
+                // Remove offline-specific card status only if it was a backend offline message
+                if (showCardEventTimer) {
+                    clearTimeout(showCardEventTimer);
+                    showCardEventTimer = null;
+                }
+                const cardStatus = document.getElementById('card-status');
+                if (cardStatus && cardStatus.dataset && cardStatus.dataset.source === 'backend_offline') {
+                    cardStatus.style.display = 'none';
+                    delete cardStatus.dataset.source;
+                }
+                updateStatus('Bereit - Bitte Karte präsentieren', '#27ae60', '💳');
+                hideProgressBar();
+            });
+
+            // General backend status event (periodic health checks)
+            socket.on('validation_backend_status', (msg) => {
+                try {
+                    const backend = document.getElementById('backend-status');
+                    if (!backend) return;
+                    if (msg.online) {
+                        backend.textContent = 'Backend: Online';
+                        backend.style.background = 'rgba(39, 174, 96, 0.9)';
+                        backend.style.color = 'white';
+                        // If backend was previously offline and we have an offline card-status, hide it
+                        const cardStatus = document.getElementById('card-status');
+                        if (cardStatus && cardStatus.dataset && cardStatus.dataset.source === 'backend_offline') {
+                            cardStatus.style.display = 'none';
+                            delete cardStatus.dataset.source;
+                        }
+                    } else {
+                        backend.textContent = 'Backend: Offline';
+                        backend.style.background = 'rgba(231, 76, 60, 0.9)';
+                        backend.style.color = 'white';
+                    }
+                } catch (e) {
+                    console.error('Failed to update backend status', e);
+                }
+            });
+
             socket.on('card_processing_cancelled', (msg) => {
                 console.log('Card processing cancelled:', msg);
                 // Remove processing visuals and revert to ready if appropriate
@@ -1264,7 +1326,12 @@
 
 <body>
     <div id="main-container">
-        <div id="connection-status">🔌 System Status</div>
+        <div style="display:flex; gap:8px; position:absolute; top:2rem; right:2rem; z-index:200;">
+            <div id="connection-status">🔌 System Status</div>
+            <div id="backend-status"
+                style="padding:0.7rem 1.2rem; border-radius:25px; font-weight:bold; background: rgba(149,165,166,0.9); color:#2c3e50;">
+                Backend: ?</div>
+        </div>
         <div id="version-info" onclick="checkForUpdates()"
             style="position: absolute; bottom: 10px; left: 10px; font-size: 12px; color: #7f8c8d; cursor: pointer; opacity: 0.7; transition: all 0.2s; z-index: 100; background: rgba(255, 255, 255, 0.8); padding: 4px 8px; border-radius: 4px;"
             title="Klicken Sie hier, um nach Updates zu suchen"

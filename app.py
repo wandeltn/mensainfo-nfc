@@ -71,6 +71,38 @@ UPDATE_CHECK_INTERVAL = 86400  # Check for updates every day (86400 seconds)
 VERSION_FILE = "current_version.json"
 BACKUP_DIR = "backup"
 RESTART_DELAY = 10  # Seconds to wait before restarting after app.py update
+BACKEND_HEALTH_POLL_INTERVAL = 30  # seconds between backend health checks
+
+
+def backend_health_loop(poll_interval: int = BACKEND_HEALTH_POLL_INTERVAL):
+    """Periodically check the validation backend and emit status changes to connected clients.
+    Emits "validation_backend_status" with {online: bool, message: str, timestamp: float}
+    """
+    last_online = None
+    while True:
+        try:
+            # Use HEAD to minimize payload; fallback to GET if HEAD not allowed
+            try:
+                r = requests.head(DATABASE_URL, timeout=2)
+            except Exception:
+                r = requests.get(DATABASE_URL, timeout=2)
+            online = 200 <= r.status_code < 500
+        except Exception:
+            online = False
+
+        if online != last_online:
+            last_online = online
+            status_msg = 'Backend erreichbar' if online else 'Backend nicht erreichbar'
+            try:
+                socketio.emit('validation_backend_status', {
+                    'online': online,
+                    'message': status_msg,
+                    'timestamp': time.time()
+                })
+            except Exception:
+                pass
+
+        time.sleep(poll_interval)
 
 # Global flags (can be modified by command line arguments)
 AUTO_UPDATE_ENABLED = True  # Default: auto-update is enabled
@@ -282,17 +314,17 @@ def validate_card_with_database(uid):
         
         # Check if request was successful (2xx status codes indicate success)
         is_valid = 200 <= response.status_code < 300
-        
         logger.info(f"Card {uid} validation result: {'VALID' if is_valid else 'INVALID'} (Status: {response.status_code})")
-        
         return is_valid
         
     except requests.exceptions.Timeout:
         logger.error(f"Timeout validating card {uid}")
-        return False
+        # Return None to indicate a connectivity/timeout error, not an unauthorized card
+        return None
     except requests.exceptions.RequestException as e:
         logger.error(f"Error validating card {uid}: {e}")
-        return False
+        # Return None to indicate a connectivity/backend error
+        return None
     except Exception as e:
         logger.error(f"Unexpected error validating card {uid}: {e}")
         return False
@@ -470,13 +502,13 @@ def validate_card_async(uid: str, cancel_event: threading.Event):
                 'uid': uid,
                 'message': 'Karte wird validiert',
                 'timestamp': time.time()
-            }, broadcast=True)
+            })
         except Exception:
             pass
 
         # Show progress update
         try:
-            socketio.emit('card_progress', {'uid': uid, 'progress': 70}, broadcast=True)
+            socketio.emit('card_progress', {'uid': uid, 'progress': 70})
         except Exception:
             pass
 
@@ -490,35 +522,57 @@ def validate_card_async(uid: str, cancel_event: threading.Event):
                 socketio.emit('card_processing_cancelled', {
                     'uid': uid,
                     'message': 'Validierung abgebrochen (Karte entfernt)'
-                }, broadcast=True)
+                })
             except Exception:
                 pass
             return
 
         # Final progress
         try:
-            socketio.emit('card_progress', {'uid': uid, 'progress': 100}, broadcast=True)
+            socketio.emit('card_progress', {'uid': uid, 'progress': 100})
         except Exception:
             pass
 
-        # Emit final result
-        if is_valid:
+        # Emit final result or indicate error/offline
+        if is_valid is None:
+            # treat as backend connectivity issue - inform clients of offline validation
+            logger.error(f"Validation backend not reachable for {uid}")
+            try:
+                socketio.emit('card_validation_offline', {'uid': uid, 'message': 'Validierungsdienst nicht erreichbar', 'timestamp': time.time()})
+                # Notify clients that backend health is offline
+                socketio.emit('validation_backend_status', {'online': False, 'message': 'Backend nicht erreichbar', 'timestamp': time.time()})
+            except Exception:
+                pass
+        elif is_valid:
             logger.info(f"Card {uid} validated (async)")
             try:
-                socketio.emit('card_success', {'uid': uid, 'message': 'Karte berechtigt'}, broadcast=True)
+                socketio.emit('card_validation_online', {'uid': uid, 'message': 'Validierung erfolgreich', 'timestamp': time.time()})
+            except Exception:
+                pass
+            try:
+                # Notify clients the backend is reachable again
+                socketio.emit('validation_backend_status', {'online': True, 'message': 'Backend erreichbar', 'timestamp': time.time()})
+                socketio.emit('card_success', {'uid': uid, 'message': 'Karte berechtigt'})
             except Exception:
                 pass
         else:
             logger.warning(f"Card {uid} invalid (async)")
             try:
-                socketio.emit('card_unauthorized', {'uid': uid, 'message': 'Karte nicht berechtigt'}, broadcast=True)
+                socketio.emit('card_validation_online', {'uid': uid, 'message': 'Validierung abgeschlossen (nicht autorisiert)', 'timestamp': time.time()})
+            except Exception:
+                pass
+            try:
+                # Backend is reachable, publish health status online
+                socketio.emit('validation_backend_status', {'online': True, 'message': 'Backend erreichbar', 'timestamp': time.time()})
+                socketio.emit('card_unauthorized', {'uid': uid, 'message': 'Karte nicht berechtigt'})
             except Exception:
                 pass
 
     except Exception as e:
         logger.error(f"Error in background validation for {uid}: {e}")
         try:
-            socketio.emit('card_validation_error', {'uid': uid, 'message': str(e)}, broadcast=True)
+            # In this unexpected error case, notify clients of validation error
+            socketio.emit('card_validation_error', {'uid': uid, 'message': str(e)})
         except Exception:
             pass
     finally:
@@ -1573,6 +1627,11 @@ if __name__ == '__main__':
     monitoring_thread = threading.Thread(target=card_check_loop, daemon=True)
     monitoring_thread.start()
     logger.info("Card monitoring thread started")
+
+    # Start backend health monitoring thread
+    health_thread = threading.Thread(target=backend_health_loop, daemon=True)
+    health_thread.start()
+    logger.info("Backend health monitoring thread started")
     
     # Start auto-update monitoring thread only if auto-update is enabled
     if AUTO_UPDATE_ENABLED:
