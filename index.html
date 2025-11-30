@@ -301,21 +301,36 @@
         }
 
         let isProcessing = false;
+        // Minimum duration for displaying final card result (success/unauthorized)
+        const MIN_RESULT_DISPLAY_MS = 3000; // 3 seconds
+        let resultVisibleUntil = 0; // epoch ms until which the result must remain visible
+        let showCardEventTimer = null; // reference to the hide timer for result display
 
-        function showCardEvent(message, isSuccess = true) {
+        function showCardEvent(message, isSuccess = true, durationMs) {
             const cardStatus = document.getElementById('card-status');
             const cardMessage = document.getElementById('card-message');
+            // Ensure that results are visible for at least the minimum time
+            const dur = Math.max(MIN_RESULT_DISPLAY_MS, typeof durationMs === 'number' ? durationMs : MIN_RESULT_DISPLAY_MS);
+            resultVisibleUntil = Date.now() + dur;
 
             cardStatus.style.display = 'block';
             cardMessage.textContent = message;
             cardStatus.className = isSuccess ? 'card-status success' : 'card-status error';
 
-            // Auto-hide after 3 seconds
-            setTimeout(() => {
+            // Cancel any previous hide timer
+            if (showCardEventTimer) {
+                clearTimeout(showCardEventTimer);
+                showCardEventTimer = null;
+            }
+
+            // Auto-hide after dur
+            showCardEventTimer = setTimeout(() => {
                 cardStatus.style.display = 'none';
                 // hide progress bar when showing a final card event
                 hideProgressBar();
-            }, 3000);
+                resultVisibleUntil = 0;
+                showCardEventTimer = null;
+            }, dur);
         }
 
         function showProgressBar() {
@@ -347,11 +362,20 @@
             socket = io('ws://' + window.location.hostname + ':5000');
 
             socket.on('reload', () => {
+                // If a read is in progress, don't reload the page — instead remind user
                 if (isProcessing) {
-                    // If a read is in progress, don't reload the page — instead remind user
                     updateStatus('Karte wird gelesen - Bitte halten', '#f39c12', '⏳', false, 0, false);
                     return;
                 }
+
+                // If a result is currently being displayed, delay reload until result visible duration ends
+                if (Date.now() < resultVisibleUntil) {
+                    const remaining = Math.max(0, resultVisibleUntil - Date.now());
+                    updateStatus('Karte erkannt - Neu laden...', '#3498db', '🔄');
+                    setTimeout(() => window.location.reload(), remaining + 200);
+                    return;
+                }
+
                 updateStatus('Karte erkannt - Neu laden...', '#3498db', '🔄');
                 setTimeout(() => window.location.reload(), 500);
             });
@@ -455,9 +479,24 @@
                 const container = document.getElementById('main-container');
                 container.classList.remove('processing');
                 const cardStatus = document.getElementById('card-status');
-                cardStatus.style.display = 'none';
                 clearTimeout(statusResetTimeout);
-                updateStatus('Karte entfernt - Bitte erneut halten', '#e67e22', '⚠️', true, 2000);
+
+                // If a final result is currently being shown, do not clear it prematurely.
+                if (Date.now() < resultVisibleUntil) {
+                    const remaining = Math.max(0, resultVisibleUntil - Date.now());
+                    // Schedule hiding processing visuals and showing "Karte entfernt" after remaining time
+                    setTimeout(() => {
+                        updateStatus('Karte entfernt - Bitte erneut halten', '#e67e22', '⚠️', true, 2000);
+                        // Only hide card status if it's not showing a result (guard by class)
+                        if (!cardStatus.classList.contains('success') && !cardStatus.classList.contains('error')) {
+                            cardStatus.style.display = 'none';
+                        }
+                    }, remaining + 50);
+                } else {
+                    updateStatus('Karte entfernt - Bitte erneut halten', '#e67e22', '⚠️', true, 2000);
+                    cardStatus.style.display = 'none';
+                }
+
                 hideProgressBar();
                 if (typeof window._progressSimulationInterval !== 'undefined') {
                     clearInterval(window._progressSimulationInterval);
