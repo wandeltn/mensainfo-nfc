@@ -13,6 +13,13 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# Module-level cache for a successfully imported ACR122U-compatible module
+_CACHED_LIB = None
+# Track the last import attempt time and avoid repeated import attempts in tight loop
+_LAST_IMPORT_ATTEMPT = 0
+_IMPORT_RETRY_INTERVAL = 5  # seconds
+_IMPORT_LOCK = None
+
 
 class ACR122UWrapper:
     def __init__(self):
@@ -22,16 +29,39 @@ class ACR122UWrapper:
 
     def _import_lib(self) -> bool:
         """Try to import a py-acr122u-compatible library under common names."""
+        global _CACHED_LIB, _LAST_IMPORT_ATTEMPT, _IMPORT_LOCK
+        import time
+        # Lazy-initialize lock
+        if _IMPORT_LOCK is None:
+            import threading
+            _IMPORT_LOCK = threading.Lock()
+        # If we successfully cached a module, reuse it to avoid repeated imports/logging
+        if _CACHED_LIB is not None and _CACHED_LIB is not False:
+            self._lib = _CACHED_LIB
+            return True
+        # If we previously cached a negative result, avoid trying again too soon
+        if _CACHED_LIB is False and (time.time() - _LAST_IMPORT_ATTEMPT) < _IMPORT_RETRY_INTERVAL:
+            return False
+
         candidates = ['acr122u', 'py_acr122u', 'pyacr122u']
-        for name in candidates:
-            try:
-                lib = __import__(name)
-                logger.info(f'Imported ACR122U library: {name}')
-                self._lib = lib
-                return True
-            except Exception:
-                continue
-        return False
+        # Only attempt to import a candidate if other recent attempts failed OR we haven't tried recently and lock to avoid race
+        with _IMPORT_LOCK:
+            _LAST_IMPORT_ATTEMPT = time.time()
+            for name in candidates:
+                try:
+                    lib = __import__(name)
+                    # Log the import only once – when we cache it
+                    logger.info(f'Imported ACR122U library: {name}')
+                    self._lib = lib
+                    # Cache for subsequent wrapper instances
+                    _CACHED_LIB = lib
+                    return True
+                except Exception:
+                    continue
+            # If we got here, import failed for all candidates; cache negative result to prevent spamming
+            _CACHED_LIB = False
+            return False
+        
 
     def connect(self) -> bool:
         """Create/initialize a device handle to read tags."""

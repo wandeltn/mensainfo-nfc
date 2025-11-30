@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 
 # --- Enhanced NFC card validation system with auto-update ---
-from py122u import nfc
+try:
+    from py122u import nfc
+except Exception:
+    nfc = None
+    logger.debug('py122u module not available; py122u nfc.Reader path disabled')
 import requests
 from flask import Response
 from server import app, socketio, run_server, stop_server  # server application instance and helpers
@@ -86,6 +90,12 @@ DISABLE_READER_BEEP = True
 FAST_READ_MODE = True  # Attempt fast reads using pyscard if available
 # ACR122U fast reader instance (if available)
 acr122_reader = None
+# Retry/backoff for ACR122U open attempts (to avoid repeated imports/log spam)
+ACR122U_RETRY_INTERVAL = 5  # seconds between open attempts when fails
+acr122u_last_attempt = None
+# Track successive acr122u read failures and temporarily disable on multiple consecutive failures
+ACR122U_MAX_FAILS = 3
+acr122u_fail_count = 0
 
 def parse_command_line_arguments():
     """
@@ -346,9 +356,16 @@ def test_nfc_reader_availability():
         if acr122u_reader is not None:
             # Try to prefer the ACR122U wrapper if available
             try:
-                global acr122_reader
+                global acr122_reader, acr122u_last_attempt
+                now = time.time()
+                # Try to open once, and on failure, only retry after backoff
                 if acr122_reader is None:
-                    acr122_reader = acr122u_reader.open_reader()
+                    if acr122u_last_attempt is None or (now - acr122u_last_attempt) >= ACR122U_RETRY_INTERVAL:
+                        acr122u_last_attempt = now
+                        acr122_reader = acr122u_reader.open_reader()
+                    else:
+                        # Skip trying to open to avoid repeated imports/logging
+                        logger.debug('Skipping ACR122U open attempt (backoff active)')
                 if acr122_reader is not None:
                     nfc_reader_available = True
                     logger.debug('ACR122U reader connected successfully')
@@ -361,8 +378,11 @@ def test_nfc_reader_availability():
                 acr122_reader = None
 
         if reader is None:
-            logger.debug(f"Creating NFC reader instance on {OS_NAME}...")
-            reader = nfc.Reader()
+            if nfc is None:
+                logger.debug('py122u nfc.Reader unavailable, skipping creation')
+            else:
+                logger.debug(f"Creating NFC reader instance on {OS_NAME}...")
+                reader = nfc.Reader()
         
         # Simple connection test - don't be too aggressive
         reader.connect()
@@ -416,16 +436,40 @@ def try_connect_and_get_uid():
     
     try:
         # Fast path: try to use ACR122U (py-acr122u wrapper) if available, then pyscard
-        global acr122_reader
+        global acr122_reader, acr122u_last_attempt
         if acr122u_reader is not None:
             try:
+                now = time.time()
                 if acr122_reader is None:
-                    acr122_reader = acr122u_reader.open_reader()
+                    # Only attempt to open after backoff to avoid repeated imports/logging
+                    if acr122u_last_attempt is None or (now - acr122u_last_attempt) >= ACR122U_RETRY_INTERVAL:
+                        acr122u_last_attempt = now
+                        acr122_reader = acr122u_reader.open_reader()
+                    else:
+                        logger.debug('Skipping ACR122U open attempt in try_connect_and_get_uid (backoff active)')
                 if acr122_reader is not None:
                     uid = acr122_reader.get_uid()
+                    logger.debug(f'ACR122U wrapper get_uid returned: {uid}')
+                    global acr122u_fail_count
                     if uid:
                         nfc_reader_available = True
+                        acr122u_fail_count = 0
                         return uid
+                    else:
+                        # Track failures and disable acr122_reader on repeated failures
+                        try:
+                            acr122u_fail_count += 1
+                        except Exception:
+                            acr122u_fail_count = 1
+                        if acr122u_fail_count >= ACR122U_MAX_FAILS:
+                            logger.warning(f'ACR122U reader failing for {acr122u_fail_count} reads; disabling temporarily')
+                            try:
+                                acr122_reader.close()
+                            except Exception:
+                                pass
+                            acr122_reader = None
+                            # set last attempt to now so backoff is in effect
+                            acr122u_last_attempt = time.time()
             except Exception:
                 acr122_reader = None
 
@@ -445,8 +489,8 @@ def try_connect_and_get_uid():
                             pyscard_conn.connect()
                         except Exception:
                             pyscard_conn = None
-                if pyscard_conn is not None:
-                    logger.debug('Using pyscard fast read path (smartcard)')
+                    if pyscard_conn is not None:
+                        logger.debug('Using pyscard fast read path (smartcard)')
                     GET_UID = [0xFF, 0xCA, 0x00, 0x00, 0x00]
                     try:
                         response, sw1, sw2 = pyscard_conn.transmit(GET_UID)
@@ -464,11 +508,15 @@ def try_connect_and_get_uid():
             except Exception:
                 pass  # pyscard not available or failed, fallback to py122u
         # Create reader if it doesn't exist (lazy initialization like old version)
-        if reader is None:
+        if reader is None and nfc is not None:
             reader = nfc.Reader()
-            reader.connect()  # Connect once during initialization
+            try:
+                reader.connect()  # Connect once during initialization
+            except Exception:
+                pass
             
         # Try to get UID (no need to reconnect every time)
+        logger.debug('Using py122u nfc.Reader get_uid path')
         arr = reader.get_uid()
         
         if arr:
