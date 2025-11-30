@@ -1,8 +1,11 @@
 {
-  "tag_name": "v0.2.2",
+  "tag_name": "v0.3.0",
   "updated_at": "2025-10-29T23:23:04.148423",
   "commit_sha": "main",
   "updated_files": [
-    "app.py"
+    "app.py",
+    "index.html",
+    "libnfc.py",
+    "acr122u_reader.py"
   ]
 }
