@@ -25,7 +25,7 @@ except Exception:
     # Do not error on import failure - nfc availability is optional
     logger.debug('py_acr122u nfc module not available; nfc.Reader path disabled')
 import requests
-from flask import Response
+from flask import Response, request
 from server import app, socketio, run_server, stop_server  # server application instance and helpers
 try:
     import acr122u_reader
@@ -78,6 +78,7 @@ def backend_health_loop(poll_interval: int = BACKEND_HEALTH_POLL_INTERVAL):
     """Periodically check the validation backend and emit status changes to connected clients.
     Emits "validation_backend_status" with {online: bool, message: str, timestamp: float}
     """
+    global backend_online
     last_online = None
     while True:
         try:
@@ -92,6 +93,7 @@ def backend_health_loop(poll_interval: int = BACKEND_HEALTH_POLL_INTERVAL):
 
         if online != last_online:
             last_online = online
+            backend_online = online
             status_msg = 'Backend erreichbar' if online else 'Backend nicht erreichbar'
             try:
                 socketio.emit('validation_backend_status', {
@@ -104,10 +106,28 @@ def backend_health_loop(poll_interval: int = BACKEND_HEALTH_POLL_INTERVAL):
 
         time.sleep(poll_interval)
 
+
+@socketio.on('connect')
+def handle_socket_connect():
+    """Send current validation backend status on new client connection (so UI can initialize state)."""
+    try:
+        if backend_online is None:
+            # Unknown; do nothing
+            return
+        # Emit only to the connecting client so we don't broadcast to all sockets
+        socketio.emit('validation_backend_status', {
+            'online': backend_online,
+            'message': 'Backend erreichbar' if backend_online else 'Backend nicht erreichbar',
+            'timestamp': time.time()
+        }, to=request.sid)
+    except Exception:
+        pass
+
 # Global flags (can be modified by command line arguments)
 AUTO_UPDATE_ENABLED = True  # Default: auto-update is enabled
 DRY_RUN = False  # Simulate actions instead of actually performing them
 DISABLE_READER_BEEP = True
+backend_online = None  # None=unknown, True=online, False=offline
 
 def parse_command_line_arguments():
     """
@@ -1632,6 +1652,21 @@ if __name__ == '__main__':
     health_thread = threading.Thread(target=backend_health_loop, daemon=True)
     health_thread.start()
     logger.info("Backend health monitoring thread started")
+
+    # Quick initial check to set backend_online and notify clients immediately
+    try:
+        try:
+            r = requests.head(DATABASE_URL, timeout=2)
+        except Exception:
+            r = requests.get(DATABASE_URL, timeout=2)
+        backend_online = 200 <= r.status_code < 500
+        socketio.emit('validation_backend_status', {'online': backend_online, 'message': 'Initial backend check', 'timestamp': time.time()})
+    except Exception:
+        backend_online = False
+        try:
+            socketio.emit('validation_backend_status', {'online': False, 'message': 'Initial backend check: offline', 'timestamp': time.time()})
+        except Exception:
+            pass
     
     # Start auto-update monitoring thread only if auto-update is enabled
     if AUTO_UPDATE_ENABLED:
