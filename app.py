@@ -1,15 +1,6 @@
 #!/usr/bin/env python3
 
 # --- Enhanced NFC card validation system with auto-update ---
-try:
-    from py122u import nfc
-except Exception:
-    nfc = None
-    logger.debug('py122u module not available; py122u nfc.Reader path disabled')
-import requests
-from flask import Response
-from server import app, socketio, run_server, stop_server  # server application instance and helpers
-# ACR122U wrapper removed — we no longer use the optional acr122u_reader
 import threading
 import time
 import logging
@@ -22,9 +13,24 @@ import argparse
 import socket
 from datetime import datetime, timedelta
 
-# Setup logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+# Setup logging FIRST, before any imports that use it
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Now import modules that may use logger
+try:
+    from py_acr122u import nfc
+except Exception:
+    nfc = None
+    # Do not error on import failure - nfc availability is optional
+    logger.debug('py_acr122u nfc module not available; nfc.Reader path disabled')
+import requests
+from flask import Response
+from server import app, socketio, run_server, stop_server  # server application instance and helpers
+try:
+    import acr122u_reader
+except Exception:
+    acr122u_reader = None
 
 # OS Detection
 IS_WINDOWS = os.name == 'nt'
@@ -36,7 +42,6 @@ logger.info(f"Detected operating system: {OS_NAME}")
 # Global variables
 reader = None
 nfc_reader_available = False
-# pyscard fast-path removed — not used by default
 
 def cleanup_nfc_reader():
     """
@@ -53,7 +58,6 @@ def cleanup_nfc_reader():
         finally:
             reader = None
             nfc_reader_available = False
-    # No ACR122U wrapper to close (we run py122u-only)
 
 # Database server configuration
 DATABASE_URL = "http://mensacheck.n-s-w.info"
@@ -72,8 +76,6 @@ RESTART_DELAY = 10  # Seconds to wait before restarting after app.py update
 AUTO_UPDATE_ENABLED = True  # Default: auto-update is enabled
 DRY_RUN = False  # Simulate actions instead of actually performing them
 DISABLE_READER_BEEP = True
-FAST_READ_MODE = False  # Fast-read-disabled by default - revert to py122u behavior
-# ACR122U support removed — we rely on py122u Reader only
 
 def parse_command_line_arguments():
     """
@@ -116,7 +118,11 @@ Examples:
         action='store_true',
         help='Try to disable the hardware beep on the NFC reader (best-effort, vendor-specific)'
     )
-    # Fast-read support removed; py122u is used by default
+    parser.add_argument(
+        '--no-fast-read',
+        action='store_true',
+        help='Disable the pyscard fast read mode; use the default reader library only (py122u/nfcpy)'
+    )
     parser.add_argument(
         '--kill-port',
         action='store_true',
@@ -204,7 +210,25 @@ def try_disable_reader_beep():
     except Exception:
         pass
 
-    # ACR122U wrapper removed — fall back to py122u or pyscard control paths only
+    # Try acr122u wrapper first (if available and supports set_beep)
+    try:
+        global acr122u_reader
+        if acr122u_reader is not None:
+            try:
+                w = acr122u_reader.open_reader()
+                if w and hasattr(w, 'set_beep'):
+                    if w.set_beep(False):
+                        logger.info('Disabled beep via acr122u reader API')
+                        try:
+                            w.close()
+                        except Exception:
+                            pass
+                        return True
+            except Exception:
+                pass
+
+    except Exception:
+        pass
 
     # Try py122u-specific approach (if library exposes control API)
     try:
@@ -235,18 +259,20 @@ def try_disable_reader_beep():
 def validate_card_with_database(uid):
     """
     Validate NFC card UID with the external database server.
+    Checks for "Erfolgreich gespeichert!" in the response to determine validity.
     
     Args:
         uid (str): The card UID in hex format
         
     Returns:
-        bool: True if card is valid, False otherwise
+        bool: True if card is valid (response contains "Erfolgreich gespeichert!"), False otherwise
     """
     try:
         # Prepare the form data
         payload = f'eingabe={uid}'
         
         logger.info(f"Validating card UID: {uid}")
+        logger.debug(f"Sending POST to {DATABASE_URL} with payload: {payload}")
         
         # Send POST request to database server
         response = requests.post(
@@ -256,10 +282,13 @@ def validate_card_with_database(uid):
             timeout=2  # 2 second timeout for faster response
         )
         
-        # Check if request was successful (2xx status codes indicate success)
-        is_valid = 200 <= response.status_code < 300
+        logger.debug(f"Response status: {response.status_code}")
+        logger.debug(f"Response text: {response.text}")
         
-        logger.info(f"Card {uid} validation result: {'VALID' if is_valid else 'INVALID'} (Status: {response.status_code})")
+        # Check if the response contains the success message
+        is_valid = "Erfolgreich gespeichert!" in response.text
+        
+        logger.info(f"Card {uid} validation result: {'VALID' if is_valid else 'INVALID'}")
         
         return is_valid
         
@@ -300,7 +329,7 @@ def get_html_content():
 def test_nfc_reader_availability():
     """
     Test if the NFC reader is available and working.
-    Uses a gentle approach similar to the old version - only create reader when needed.
+    Simply tries to create a reader instance.
     
     Returns:
         bool: True if reader is available, False otherwise
@@ -309,19 +338,16 @@ def test_nfc_reader_availability():
     
     try:
         # Only create reader instance if it doesn't exist (lazy initialization)
-
         if reader is None:
             if nfc is None:
-                logger.debug('py122u nfc.Reader unavailable, skipping creation')
-            else:
-                logger.debug(f"Creating NFC reader instance on {OS_NAME}...")
-                reader = nfc.Reader()
-        
-        # Simple connection test - don't be too aggressive
-        reader.connect()
+                logger.debug(f"nfc.Reader unavailable on {OS_NAME}")
+                nfc_reader_available = False
+                return False
+            logger.debug(f"Creating NFC reader instance on {OS_NAME}...")
+            reader = nfc.Reader()
         
         nfc_reader_available = True
-        logger.debug(f"✅ NFC reader is working on {OS_NAME}")
+        logger.debug(f"✅ NFC reader is available on {OS_NAME}")
         
         # Only emit events if we have active WebSocket connections
         try:
@@ -334,7 +360,7 @@ def test_nfc_reader_availability():
     except Exception as e:
         nfc_reader_available = False
         
-        # Clean up silently
+        # Clean up on error
         if reader is not None:
             try:
                 reader.close()
@@ -342,7 +368,6 @@ def test_nfc_reader_availability():
                 pass
             reader = None
         
-        # Log error but don't be too verbose (like old version)
         logger.debug(f"NFC reader not available: {e}")
         
         # Only emit events if we have active WebSocket connections
@@ -359,35 +384,54 @@ def test_nfc_reader_availability():
 
 def try_connect_and_get_uid():
     """
-    Attempt to connect to NFC reader and get card UID.
-    Optimized for faster reading with persistent connection.
+    Attempt to connect to NFC reader and get card UID using py_acr122u nfc.Reader.
+    Uses non-blocking pattern from libnfc.py - connect() and get_uid() return immediately
+    and raise exceptions if no card is present.
     
     Returns:
         str or None: Card UID in uppercase hex format, or None if no card/error
     """
     global nfc_reader_available, reader
+    
     try:
-        # Reverted to a simpler, original py122u-only path: avoid ACR and pyscard fast-path
+        # Create reader if it doesn't exist (lazy initialization)
         if reader is None:
             if nfc is None:
-                logger.debug('py122u nfc.Reader unavailable, skipping creation')
+                logger.debug('nfc.Reader unavailable (py_acr122u not installed)')
                 return None
+            logger.debug('Creating nfc.Reader instance')
             reader = nfc.Reader()
-            try:
-                reader.connect()
-            except Exception:
-                pass
-
-        logger.debug('Using py122u nfc.Reader get_uid path (reverted)')
-        arr = reader.get_uid()
-        if arr:
-            result = ''.join(f'{x:02X}' for x in arr)
-            nfc_reader_available = True
-            return result
-        return None
+        
+        # Non-blocking connect() and get_uid() - they return immediately
+        # If no card is present, they raise exceptions which we catch as "no card"
+        try:
+            reader.connect()
+            uid_response = reader.get_uid()
             
+            # get_uid() returns a list of integers (the UID bytes)
+            if uid_response:
+                uid_hex = ''.join([f'{x:02X}' for x in uid_response])
+                logger.info(f'Card detected! UID: {uid_hex}')
+                nfc_reader_available = True
+                return uid_hex
+            else:
+                logger.debug('get_uid() returned empty response')
+                nfc_reader_available = False
+                return None
+        except Exception as e:
+            # connect() or get_uid() raise exceptions when there's no card
+            # We treat these as "no card available" - a normal polling state, not an error
+            msg = str(e)
+            if any(x in msg.lower() for x in ['card not connected', 'connect', 'no card', 'instruction', 'communication']):
+                logger.debug(f'No card detected: {e}')
+            else:
+                logger.debug(f'Reader call raised exception: {e}')
+            nfc_reader_available = False
+            return None
+    
     except Exception as e:
-        # On error, clean up and reset connection for next attempt
+        # Unexpected error outside of connect/get_uid - reset reader for next attempt
+        logger.debug(f'Unexpected error in try_connect_and_get_uid: {e}')
         nfc_reader_available = False
         if reader is not None:
             try:
@@ -448,12 +492,12 @@ def card_check_loop():
                         'uid': uid,
                         'message': 'Bitte halten Sie die Karte bis die Lesung abgeschlossen ist',
                         'timestamp': time.time()
-                    })
+                    }, broadcast=True)
                     # Start progress with a small initial value
                     socketio.emit('card_progress', {
                         'uid': uid,
                         'progress': 10,
-                    })
+                    }, broadcast=True)
 
                     # Stability sampling: ensure the UID reads stable for N checks
                     stable = False
@@ -515,14 +559,14 @@ def card_check_loop():
                             'uid': sampled_uid,
                             'message': 'Karte berechtigt',
                             'timestamp': time.time()
-                        })
+                        }, broadcast=True)
                     else:
                         logger.warning(f"Card {sampled_uid} is INVALID")
                         socketio.emit('card_unauthorized', {
                             'uid': sampled_uid,
                             'message': 'Karte nicht berechtigt',
                             'timestamp': time.time()
-                        })
+                        }, broadcast=True)
 
                     reading_in_progress = False
             else:
@@ -565,7 +609,7 @@ def card_check_loop():
                 last_validation_result = None
                 socketio.emit('reload')
 
-        # Reverted to simple polling interval
+        # Poll at regular interval
         time.sleep(POLL_INTERVAL)
 
 def get_current_version():
@@ -941,6 +985,36 @@ def is_port_available(host='localhost', port=5000, timeout=1):
             return result != 0
     except Exception:
         return True
+
+
+    def check_pcsc_service():
+#        "Quick diagnostic: check if pcscd / pyscard is installed and returns a reader list."
+        try:
+            from smartcard.System import readers as sc_readers
+        except Exception:
+            logger.info('pyscard (smartcard) not installed: `pip install pyscard` to enable PC/SC checks')
+            return False
+
+        try:
+            r = sc_readers()
+            logger.debug(f'PC/SC readers available via pyscard: {r}')
+            if not r:
+                # If running on Linux, hint to check the pcscd service
+                if IS_LINUX:
+                    try:
+                        import subprocess
+                        out = subprocess.check_output(['systemctl', 'is-active', 'pcscd'], stderr=subprocess.DEVNULL, universal_newlines=True)
+                        if out.strip() == 'active':
+                            logger.debug('pcscd service is active but no readers found - try unplug/replug the device or check udev rules')
+                        else:
+                            logger.warning('pcscd service appears inactive. Try: sudo systemctl enable --now pcscd')
+                    except Exception:
+                        logger.debug('Could not detect pcscd service state - if on Linux, make sure pcscd/pcscd.service is installed and running')
+                return False
+            return True
+        except Exception as e:
+            logger.debug(f'PC/SC readers check failed: {e}')
+            return False
 
 def wait_for_port_available(host='localhost', port=5000, max_wait_time=60, check_interval=0.5):
     start_time = time.time()
@@ -1482,7 +1556,7 @@ if __name__ == '__main__':
         logger.info('Attempting to disable reader beep (best-effort)')
         # Best-effort call
         try_disable_reader_beep()
-    # No fast-read flag available (py122u-only behavior)
+    # Fast read mode flag removed - now always uses blocking get_uid() pattern
     
     # Clean up any leftover temporary restart scripts
     cleanup_temporary_files()
@@ -1498,6 +1572,14 @@ if __name__ == '__main__':
     current_version = get_current_version()
     logger.info(f"Current version: {current_version['tag_name']}")
     logger.info("=" * 60)
+    # Check PC/SC availability and log hints for troubleshooting
+    try:
+        pcsc_ok = check_pcsc_service()
+        logger.info(f'PC/SC (pyscard) available: {pcsc_ok}')
+        if not pcsc_ok:
+            logger.info('If your reader is not detected, consider installing/enabling pcscd and adding udev rules; see readme or app logs for details.')
+    except Exception:
+        logger.debug('PC/SC check skipped due to lack of pyscard or systemctl detection')
     
     # Start card monitoring thread (it will handle NFC reader initialization)
     monitoring_thread = threading.Thread(target=card_check_loop, daemon=True)
