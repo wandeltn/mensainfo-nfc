@@ -380,421 +380,428 @@
         // Declare socket in global scope
         let socket;
 
-        // Injected JS: WebSocket with visual feedback
-        try {
-            socket = io('ws://' + window.location.hostname + ':5000');
+        // Initialize socket and UI interactions once DOM is ready
+        document.addEventListener('DOMContentLoaded', function () {
+            // Injected JS: WebSocket with visual feedback
+            try {
+                socket = io('ws://' + window.location.hostname + ':5000');
 
-            socket.on('reload', () => {
-                // If a read is in progress, don't reload the page — instead remind user
-                if (isProcessing) {
-                    updateStatus('Karte wird gelesen - Bitte halten', '#f39c12', '⏳', false, 0, false);
-                    return;
-                }
+                socket.on('reload', () => {
+                    // If a read is in progress, don't reload the page — instead remind user
+                    if (isProcessing) {
+                        updateStatus('Karte wird gelesen - Bitte halten', '#f39c12', '⏳', false, 0, false);
+                        return;
+                    }
 
-                // If a result is currently being displayed, delay moving on until that duration ends
-                if (Date.now() < resultVisibleUntil) {
-                    const remaining = Math.max(0, resultVisibleUntil - Date.now());
-                    // Show a brief transitional status while waiting for the result visibility to finish
-                    updateStatus('Karte erkannt - Bitte entfernen', '#3498db', '🔄');
+                    // If a result is currently being displayed, delay moving on until that duration ends
+                    if (Date.now() < resultVisibleUntil) {
+                        const remaining = Math.max(0, resultVisibleUntil - Date.now());
+                        // Show a brief transitional status while waiting for the result visibility to finish
+                        updateStatus('Karte erkannt - Bitte entfernen', '#3498db', '🔄');
+                        setTimeout(() => {
+                            resetToReadyState();
+                            // Hide any bottom card status
+                            const cardStatus = document.getElementById('card-status');
+                            if (cardStatus) cardStatus.style.display = 'none';
+                            hideProgressBar();
+                        }, remaining + 100);
+                        return;
+                    }
+
+                    // No result showing — move on to ready state after a short delay
+                    updateStatus('Bitte entfernen Sie die Karte', '#3498db', '🔄');
                     setTimeout(() => {
                         resetToReadyState();
-                        // Hide any bottom card status
                         const cardStatus = document.getElementById('card-status');
                         if (cardStatus) cardStatus.style.display = 'none';
                         hideProgressBar();
-                    }, remaining + 100);
-                    return;
-                }
+                    }, 200);
+                });
 
-                // No result showing — move on to ready state after a short delay
-                updateStatus('Bitte entfernen Sie die Karte', '#3498db', '🔄');
-                setTimeout(() => {
-                    resetToReadyState();
+                socket.on('card_success', (msg) => {
+                    console.log(msg);
+                    // Clear processing visuals now that validation is complete
+                    isProcessing = false;
+                    const container = document.getElementById('main-container');
+                    if (container) container.classList.remove('processing');
                     const cardStatus = document.getElementById('card-status');
                     if (cardStatus) cardStatus.style.display = 'none';
-                    hideProgressBar();
-                }, 200);
-            });
-
-            socket.on('card_success', (msg) => {
-                console.log(msg);
-                // Clear processing visuals now that validation is complete
-                isProcessing = false;
-                const container = document.getElementById('main-container');
-                container.classList.remove('processing');
-                const cardStatus = document.getElementById('card-status');
-                cardStatus.style.display = 'none';
-                showCardEvent('Karte erfolgreich autorisiert!', true);
-                // Keep the success state visible until the card is removed (reload event)
-                updateStatus('Karte autorisiert', '#27ae60', '✅', false, 0);
-                setProgress(100);
-                if (typeof window._progressSimulationInterval !== 'undefined') {
-                    clearInterval(window._progressSimulationInterval);
-                    window._progressSimulationInterval = undefined;
-                }
-                setTimeout(() => hideProgressBar(), 300);
-            });
-
-            // New handler: a card is detected and is being read — instruct user to hold card
-            socket.on('card_processing', (msg) => {
-                console.log('Card processing:', msg);
-                // Show persistent status and message to hold the card until finished
-                isProcessing = true;
-                updateStatus('Karte wird gelesen - Bitte halten', '#f39c12', '⏳', false, 0, false);
-                // Show a subtle visual to indicate processing
-                const container = document.getElementById('main-container');
-                container.classList.add('processing');
-                // Show the small bottom card-status area as persistent processing
-                const cardStatus = document.getElementById('card-status');
-                const cardMessage = document.getElementById('card-message');
-                cardMessage.textContent = msg.message || 'Karte wird gelesen...';
-                cardStatus.style.display = 'block';
-                cardStatus.className = 'card-status processing';
-                showProgressBar();
-                setProgress(10);
-                // Ensure processing visual remains a hint rather than permanent
-                // If the server doesn't emit progress after 2 seconds, simulate small updates
-                if (typeof window._progressSimulationInterval !== 'undefined') {
-                    clearInterval(window._progressSimulationInterval);
-                }
-                window._progressSimulationInterval = setInterval(() => {
-                    const fill = document.getElementById('progress-fill');
-                    if (!fill) return;
-                    const current = parseInt(fill.style.width || '0');
-                    if (current >= 95) return;
-                    setProgress(current + Math.max(1, Math.floor((100 - current) * 0.12)));
-                }, 350);
-            });
-
-            socket.on('card_progress', (msg) => {
-                try {
-                    if (msg && typeof msg.progress !== 'undefined') {
-                        showProgressBar();
-                        setProgress(msg.progress);
+                    showCardEvent('Karte erfolgreich autorisiert!', true);
+                    // Keep the success state visible until the card is removed (reload event)
+                    updateStatus('Karte autorisiert', '#27ae60', '✅', false, 0);
+                    setProgress(100);
+                    if (typeof window._progressSimulationInterval !== 'undefined') {
+                        clearInterval(window._progressSimulationInterval);
+                        window._progressSimulationInterval = undefined;
                     }
-                } catch (err) {
-                    console.warn('Failed to set progress', err);
-                }
-            });
+                    setTimeout(() => hideProgressBar(), 300);
+                });
 
-            // New handler: server-side indicates the card is validated (network check in progress)
-            socket.on('card_validating', (msg) => {
-                console.log('Card validating:', msg);
-                // Keep the processing visuals, but change the message and color to indicate network validation
-                isProcessing = true;
-                updateStatus('Karte wird validiert - Bitte warten', '#3498db', '🔁', false, 0, false);
-                const container = document.getElementById('main-container');
-                container.classList.add('processing');
-                const cardStatus = document.getElementById('card-status');
-                const cardMessage = document.getElementById('card-message');
-                cardMessage.textContent = msg.message || 'Validierung läuft...';
-                cardStatus.style.display = 'block';
-                cardStatus.className = 'card-status processing';
-                showProgressBar();
-                setProgress(70);
-            });
+                // New handler: a card is detected and is being read — instruct user to hold card
+                socket.on('card_processing', (msg) => {
+                    console.log('Card processing:', msg);
+                    // Show persistent status and message to hold the card until finished
+                    isProcessing = true;
+                    updateStatus('Karte wird gelesen - Bitte halten', '#f39c12', '⏳', false, 0, false);
+                    // Show a subtle visual to indicate processing
+                    const container = document.getElementById('main-container');
+                    if (container) container.classList.add('processing');
+                    // Show the small bottom card-status area as persistent processing
+                    const cardStatus = document.getElementById('card-status');
+                    const cardMessage = document.getElementById('card-message');
+                    if (cardMessage) cardMessage.textContent = msg.message || 'Karte wird gelesen...';
+                    if (cardStatus) {
+                        cardStatus.style.display = 'block';
+                        cardStatus.className = 'card-status processing';
+                    }
+                    showProgressBar();
+                    setProgress(10);
+                    // Ensure processing visual remains a hint rather than permanent
+                    // If the server doesn't emit progress after 2 seconds, simulate small updates
+                    if (typeof window._progressSimulationInterval !== 'undefined') {
+                        clearInterval(window._progressSimulationInterval);
+                    }
+                    window._progressSimulationInterval = setInterval(() => {
+                        const fill = document.getElementById('progress-fill');
+                        if (!fill) return;
+                        const current = parseInt(fill.style.width || '0');
+                        if (current >= 95) return;
+                        setProgress(current + Math.max(1, Math.floor((100 - current) * 0.12)));
+                    }, 350);
+                });
 
-            socket.on('card_validation_error', (msg) => {
-                console.error('Card validation error:', msg);
-                isProcessing = false;
-                const container = document.getElementById('main-container');
-                container.classList.remove('processing');
-                const cardStatus = document.getElementById('card-status');
-                cardStatus.style.display = 'none';
-                // Auto-hide validation errors
-                showCardEvent('Validierungsfehler beim Server', false, 5000, true);
-                updateStatus('Validierungsfehler', '#e74c3c', '❌', true, 5000);
-                hideProgressBar();
-                if (typeof window._progressSimulationInterval !== 'undefined') {
-                    clearInterval(window._progressSimulationInterval);
-                    window._progressSimulationInterval = undefined;
-                }
-            });
+                socket.on('card_progress', (msg) => {
+                    try {
+                        if (msg && typeof msg.progress !== 'undefined') {
+                            showProgressBar();
+                            setProgress(msg.progress);
+                        }
+                    } catch (err) {
+                        console.warn('Failed to set progress', err);
+                    }
+                });
 
-            socket.on('card_validation_offline', (msg) => {
-                console.warn('Card validation offline:', msg);
-                // Treat as a special case: backend/service unreachable
-                isProcessing = false;
-                const container = document.getElementById('main-container');
-                container.classList.remove('processing');
-                // Use an orange status to differentiate from a straight error
-                // Auto-hide offline notice after a reasonable time
-                showCardEvent('Validierungsdienst nicht erreichbar – bitte Netzwerk prüfen', false, 6000, true);
-                // mark the card status as coming from backend offline state
-                const cardStatus = document.getElementById('card-status');
-                cardStatus.dataset.source = 'backend_offline';
-                updateStatus('Validierungsdienst nicht erreichbar', '#e67e22', '⚠️', true, 6000);
-                // Keep the progress bar in a state that shows activity or stop it
-                setProgress(100);
-                hideProgressBar();
-                if (typeof window._progressSimulationInterval !== 'undefined') {
-                    clearInterval(window._progressSimulationInterval);
-                    window._progressSimulationInterval = undefined;
-                }
-            });
+                // New handler: server-side indicates the card is validated (network check in progress)
+                socket.on('card_validating', (msg) => {
+                    console.log('Card validating:', msg);
+                    // Keep the processing visuals, but change the message and color to indicate network validation
+                    isProcessing = true;
+                    updateStatus('Karte wird validiert - Bitte warten', '#3498db', '🔁', false, 0, false);
+                    const container = document.getElementById('main-container');
+                    if (container) container.classList.add('processing');
+                    const cardStatus = document.getElementById('card-status');
+                    const cardMessage = document.getElementById('card-message');
+                    if (cardMessage) cardMessage.textContent = msg.message || 'Validierung läuft...';
+                    if (cardStatus) {
+                        cardStatus.style.display = 'block';
+                        cardStatus.className = 'card-status processing';
+                    }
+                    showProgressBar();
+                    setProgress(70);
+                });
 
-            socket.on('card_validation_online', (msg) => {
-                console.log('Validation backend reachable again:', msg);
-                // Remove offline-specific card status only if it was a backend offline message
-                if (showCardEventTimer) {
-                    clearTimeout(showCardEventTimer);
-                    showCardEventTimer = null;
-                }
-                const cardStatus = document.getElementById('card-status');
-                if (cardStatus && cardStatus.dataset && cardStatus.dataset.source === 'backend_offline') {
-                    cardStatus.style.display = 'none';
-                    delete cardStatus.dataset.source;
-                }
-                updateStatus('Bereit - Bitte Karte präsentieren', '#27ae60', '💳');
-                hideProgressBar();
-            });
+                socket.on('card_validation_error', (msg) => {
+                    console.error('Card validation error:', msg);
+                    isProcessing = false;
+                    const container = document.getElementById('main-container');
+                    if (container) container.classList.remove('processing');
+                    const cardStatus = document.getElementById('card-status');
+                    if (cardStatus) cardStatus.style.display = 'none';
+                    // Auto-hide validation errors
+                    showCardEvent('Validierungsfehler beim Server', false, 5000, true);
+                    updateStatus('Validierungsfehler', '#e74c3c', '❌', true, 5000);
+                    hideProgressBar();
+                    if (typeof window._progressSimulationInterval !== 'undefined') {
+                        clearInterval(window._progressSimulationInterval);
+                        window._progressSimulationInterval = undefined;
+                    }
+                });
 
-            // General backend status event (periodic health checks)
-            socket.on('validation_backend_status', (msg) => {
-                try {
-                    const backend = document.getElementById('backend-status');
-                    if (!backend) return;
-                    // mark backend as responded for initialization
-                    backend.dataset.initialized = 'true';
-                    if (typeof msg.online === 'boolean') {
-                        if (msg.online) {
-                            backend.textContent = 'Backend: Online';
-                            backend.style.background = 'rgba(39, 174, 96, 0.9)';
-                            backend.style.color = 'white';
-                            // If backend was previously offline and we have an offline card-status, hide it
-                            const cardStatus = document.getElementById('card-status');
-                            if (cardStatus && cardStatus.dataset && cardStatus.dataset.source === 'backend_offline') {
-                                cardStatus.style.display = 'none';
-                                delete cardStatus.dataset.source;
+                socket.on('card_validation_offline', (msg) => {
+                    console.warn('Card validation offline:', msg);
+                    // Treat as a special case: backend/service unreachable
+                    isProcessing = false;
+                    const container = document.getElementById('main-container');
+                    if (container) container.classList.remove('processing');
+                    // Use an orange status to differentiate from a straight error
+                    // Auto-hide offline notice after a reasonable time
+                    showCardEvent('Validierungsdienst nicht erreichbar - bitte Netzwerk prüfen', false, 6000, true);
+                    // mark the card status as coming from backend offline state
+                    const cardStatus = document.getElementById('card-status');
+                    if (cardStatus) cardStatus.dataset.source = 'backend_offline';
+                    updateStatus('Validierungsdienst nicht erreichbar', '#e67e22', '⚠️', true, 6000);
+                    // Keep the progress bar in a state that shows activity or stop it
+                    setProgress(100);
+                    hideProgressBar();
+                    if (typeof window._progressSimulationInterval !== 'undefined') {
+                        clearInterval(window._progressSimulationInterval);
+                        window._progressSimulationInterval = undefined;
+                    }
+                });
+
+                socket.on('card_validation_online', (msg) => {
+                    console.log('Validation backend reachable again:', msg);
+                    // Remove offline-specific card status only if it was a backend offline message
+                    if (showCardEventTimer) {
+                        clearTimeout(showCardEventTimer);
+                        showCardEventTimer = null;
+                    }
+                    const cardStatus = document.getElementById('card-status');
+                    if (cardStatus && cardStatus.dataset && cardStatus.dataset.source === 'backend_offline') {
+                        cardStatus.style.display = 'none';
+                        delete cardStatus.dataset.source;
+                    }
+                    updateStatus('Bereit - Bitte Karte präsentieren', '#27ae60', '💳');
+                    hideProgressBar();
+                });
+
+                // General backend status event (periodic health checks)
+                socket.on('validation_backend_status', (msg) => {
+                    try {
+                        const backend = document.getElementById('backend-status');
+                        if (!backend) return;
+                        // mark backend as responded for initialization
+                        backend.dataset.initialized = 'true';
+                        if (typeof msg.online === 'boolean') {
+                            if (msg.online) {
+                                backend.textContent = 'Backend: Online';
+                                backend.style.background = 'rgba(39, 174, 96, 0.9)';
+                                backend.style.color = 'white';
+                                // If backend was previously offline and we have an offline card-status, hide it
+                                const cardStatus = document.getElementById('card-status');
+                                if (cardStatus && cardStatus.dataset && cardStatus.dataset.source === 'backend_offline') {
+                                    cardStatus.style.display = 'none';
+                                    delete cardStatus.dataset.source;
+                                }
+                            } else {
+                                backend.textContent = 'Backend: Offline';
+                                backend.style.background = 'rgba(231, 76, 60, 0.9)';
+                                backend.style.color = 'white';
                             }
                         } else {
-                            backend.textContent = 'Backend: Offline';
-                            backend.style.background = 'rgba(231, 76, 60, 0.9)';
-                            backend.style.color = 'white';
+                            backend.textContent = 'Backend: Unbekannt';
+                            backend.style.background = 'rgba(149,165,166,0.9)';
+                            backend.style.color = '#2c3e50';
                         }
+                    } catch (e) {
+                        console.error('Failed to update backend status', e);
+                    }
+                });
+
+                // If no backend status is received within a short timeout, keep 'Unbekannt' visible
+                (function waitForBackendInit() {
+                    const backend = document.getElementById('backend-status');
+                    if (!backend) return;
+                    // Use a short timeout to avoid flicker on slow startup
+                    setTimeout(() => {
+                        if (!backend.dataset.initialized) {
+                            backend.textContent = 'Backend: Unbekannt';
+                            backend.style.background = 'rgba(149,165,166,0.9)';
+                            backend.style.color = '#2c3e50';
+                        }
+                    }, 3000);
+                })();
+
+                socket.on('card_processing_cancelled', (msg) => {
+                    console.log('Card processing cancelled:', msg);
+                    // Remove processing visuals and revert to ready if appropriate
+                    const container = document.getElementById('main-container');
+                    if (container) container.classList.remove('processing');
+                    const cardStatus = document.getElementById('card-status');
+                    clearTimeout(statusResetTimeout);
+
+                    // If a final result is currently being shown, do not clear it prematurely.
+                    if (Date.now() < resultVisibleUntil) {
+                        const remaining = Math.max(0, resultVisibleUntil - Date.now());
+                        // Schedule hiding processing visuals and showing "Karte entfernt" after remaining time
+                        setTimeout(() => {
+                            updateStatus('Karte entfernt - Bitte erneut halten', '#e67e22', '⚠️', true, 2000);
+                            // Only hide card status if it's not showing a result (guard by class)
+                            if (cardStatus && !cardStatus.classList.contains('success') && !cardStatus.classList.contains('error')) {
+                                cardStatus.style.display = 'none';
+                            }
+                        }, remaining + 50);
                     } else {
-                        backend.textContent = 'Backend: Unbekannt';
-                        backend.style.background = 'rgba(149,165,166,0.9)';
-                        backend.style.color = '#2c3e50';
-                    }
-                } catch (e) {
-                    console.error('Failed to update backend status', e);
-                }
-            });
-
-            // If no backend status is received within a short timeout, keep 'Unbekannt' visible
-            (function waitForBackendInit() {
-                const backend = document.getElementById('backend-status');
-                if (!backend) return;
-                // Use a short timeout to avoid flicker on slow startup
-                setTimeout(() => {
-                    if (!backend.dataset.initialized) {
-                        backend.textContent = 'Backend: Unbekannt';
-                        backend.style.background = 'rgba(149,165,166,0.9)';
-                        backend.style.color = '#2c3e50';
-                    }
-                }, 3000);
-            })();
-
-            socket.on('card_processing_cancelled', (msg) => {
-                console.log('Card processing cancelled:', msg);
-                // Remove processing visuals and revert to ready if appropriate
-                const container = document.getElementById('main-container');
-                container.classList.remove('processing');
-                const cardStatus = document.getElementById('card-status');
-                clearTimeout(statusResetTimeout);
-
-                // If a final result is currently being shown, do not clear it prematurely.
-                if (Date.now() < resultVisibleUntil) {
-                    const remaining = Math.max(0, resultVisibleUntil - Date.now());
-                    // Schedule hiding processing visuals and showing "Karte entfernt" after remaining time
-                    setTimeout(() => {
                         updateStatus('Karte entfernt - Bitte erneut halten', '#e67e22', '⚠️', true, 2000);
-                        // Only hide card status if it's not showing a result (guard by class)
-                        if (!cardStatus.classList.contains('success') && !cardStatus.classList.contains('error')) {
-                            cardStatus.style.display = 'none';
-                        }
-                    }, remaining + 50);
-                } else {
-                    updateStatus('Karte entfernt - Bitte erneut halten', '#e67e22', '⚠️', true, 2000);
-                    cardStatus.style.display = 'none';
-                }
-
-                hideProgressBar();
-                if (typeof window._progressSimulationInterval !== 'undefined') {
-                    clearInterval(window._progressSimulationInterval);
-                    window._progressSimulationInterval = undefined;
-                }
-            });
-
-            socket.on('connect', () => {
-                console.log('WebSocket connected');
-                isConnected = true;
-                connectionAttempts = 0;
-                clearConnectionTimeout();
-
-                // Clear any connection failure effects
-                const container = document.getElementById('main-container');
-                container.classList.remove('connection-failed', 'shake');
-                const errorDetails = document.getElementById('connection-error-details');
-                if (errorDetails) {
-                    // Clear the timer if it exists
-                    if (errorDetails.timerInterval) {
-                        clearInterval(errorDetails.timerInterval);
+                        if (cardStatus) cardStatus.style.display = 'none';
                     }
-                    errorDetails.remove();
-                }
 
-                updateStatus('Bereit - Bitte Karte präsentieren', '#878787', '💳');
-                updateSystemStatus('Connected', 'rgba(39, 174, 96, 0.9)', '🟢');
-                // Ensure any progress bar is hidden when reconnecting
-                hideProgressBar();
-                if (typeof window._progressSimulationInterval !== 'undefined') {
-                    clearInterval(window._progressSimulationInterval);
-                    window._progressSimulationInterval = undefined;
-                }
+                    hideProgressBar();
+                    if (typeof window._progressSimulationInterval !== 'undefined') {
+                        clearInterval(window._progressSimulationInterval);
+                        window._progressSimulationInterval = undefined;
+                    }
+                });
 
-                // Request version info on connection
-                requestVersionInfo();
-            });
+                socket.on('connect', () => {
+                    console.log('WebSocket connected');
+                    isConnected = true;
+                    connectionAttempts = 0;
+                    clearConnectionTimeout();
 
-            socket.on('disconnect', () => {
-                console.log('WebSocket disconnected');
-                isConnected = false;
-                updateStatus('Verbindung verloren - Wiederverbindung wird versucht...', '#e67e22', '⚠️', false, 0, false); // No pulse for disconnect
-                updateSystemStatus('Disconnected', 'rgba(231, 76, 60, 0.9)', '🔴');
+                    // Clear any connection failure effects
+                    const container = document.getElementById('main-container');
+                    if (container) container.classList.remove('connection-failed', 'shake');
+                    const errorDetails = document.getElementById('connection-error-details');
+                    if (errorDetails) {
+                        // Clear the timer if it exists
+                        if (errorDetails.timerInterval) {
+                            clearInterval(errorDetails.timerInterval);
+                        }
+                        errorDetails.remove();
+                    }
 
-                // Start connection timeout for reconnection attempts
-                startConnectionTimeout();
-                // Clear any progress visuals
-                hideProgressBar();
-                if (typeof window._progressSimulationInterval !== 'undefined') {
-                    clearInterval(window._progressSimulationInterval);
-                    window._progressSimulationInterval = undefined;
-                }
-            });
+                    updateStatus('Bereit - Bitte Karte präsentieren', '#878787', '💳');
+                    updateSystemStatus('Connected', 'rgba(39, 174, 96, 0.9)', '🟢');
+                    // Ensure any progress bar is hidden when reconnecting
+                    hideProgressBar();
+                    if (typeof window._progressSimulationInterval !== 'undefined') {
+                        clearInterval(window._progressSimulationInterval);
+                        window._progressSimulationInterval = undefined;
+                    }
 
-            socket.on('card_unauthorized', (msg) => {
-                console.error('Card unauthorized:', msg);
-                // Clear processing visuals now that validation is complete
-                isProcessing = false;
-                const container = document.getElementById('main-container');
-                container.classList.remove('processing');
-                const cardStatus = document.getElementById('card-status');
-                cardStatus.style.display = 'none';
-                showCardEvent('Karte nicht berechtigt', false);
-                // Keep unauthorized status until the card is removed (reload event)
-                updateStatus('Karte nicht berechtigt', '#e74c3c', '❌', false, 0);
-                setProgress(100);
-                if (typeof window._progressSimulationInterval !== 'undefined') {
-                    clearInterval(window._progressSimulationInterval);
-                    window._progressSimulationInterval = undefined;
-                }
-                setTimeout(() => hideProgressBar(), 300);
-            });
+                    // Request version info on connection
+                    requestVersionInfo();
+                });
 
-            socket.on('nfc_reader_available', () => {
-                console.log('NFC reader is available');
-                updateStatus('Bereit - Bitte Karte präsentieren', '#27ae60', '💳');
-                updateSystemStatus('NFC Bereit', 'rgba(39, 174, 96, 0.9)', '📡');
+                socket.on('disconnect', () => {
+                    console.log('WebSocket disconnected');
+                    isConnected = false;
+                    updateStatus('Verbindung verloren - Wiederverbindung wird versucht...', '#e67e22', '⚠️', false, 0, false); // No pulse for disconnect
+                    updateSystemStatus('Disconnected', 'rgba(231, 76, 60, 0.9)', '🔴');
 
-                // Clear any error states
-                const container = document.getElementById('main-container');
-                container.classList.remove('nfc-unavailable');
-                const nfcError = document.getElementById('nfc-error-details');
-                if (nfcError) {
-                    nfcError.remove();
-                }
-            });
+                    // Start connection timeout for reconnection attempts
+                    startConnectionTimeout();
+                    // Clear any progress visuals
+                    hideProgressBar();
+                    if (typeof window._progressSimulationInterval !== 'undefined') {
+                        clearInterval(window._progressSimulationInterval);
+                        window._progressSimulationInterval = undefined;
+                    }
+                });
 
-            socket.on('nfc_reader_unavailable', (data) => {
-                console.error('NFC reader unavailable:', data);
-                updateStatus('NFC-Lesegerät nicht erkannt', '#e74c3c', '🚫', false, 0, false);
-                updateSystemStatus('NFC Fehler', 'rgba(231, 76, 60, 0.9)', '🚫');
+                socket.on('card_unauthorized', (msg) => {
+                    console.error('Card unauthorized:', msg);
+                    // Clear processing visuals now that validation is complete
+                    isProcessing = false;
+                    const container = document.getElementById('main-container');
+                    if (container) container.classList.remove('processing');
+                    const cardStatus = document.getElementById('card-status');
+                    if (cardStatus) cardStatus.style.display = 'none';
+                    showCardEvent('Karte nicht berechtigt', false);
+                    // Keep unauthorized status until the card is removed (reload event)
+                    updateStatus('Karte nicht berechtigt', '#e74c3c', '❌', false, 0);
+                    setProgress(100);
+                    if (typeof window._progressSimulationInterval !== 'undefined') {
+                        clearInterval(window._progressSimulationInterval);
+                        window._progressSimulationInterval = undefined;
+                    }
+                    setTimeout(() => hideProgressBar(), 300);
+                });
 
-                // Add visual indication for missing NFC reader
-                const container = document.getElementById('main-container');
-                container.classList.add('nfc-unavailable');
+                socket.on('nfc_reader_available', () => {
+                    console.log('NFC reader is available');
+                    updateStatus('Bereit - Bitte Karte präsentieren', '#27ae60', '💳');
+                    updateSystemStatus('NFC Bereit', 'rgba(39, 174, 96, 0.9)', '📡');
 
-                // Show detailed NFC error message
-                showNFCReaderError(data.message || 'NFC-Lesegerät nicht verfügbar');
-            });
+                    // Clear any error states
+                    const container = document.getElementById('main-container');
+                    if (container) container.classList.remove('nfc-unavailable');
+                    const nfcError = document.getElementById('nfc-error-details');
+                    if (nfcError) {
+                        nfcError.remove();
+                    }
+                });
 
-            socket.on('system_updated', function (data) {
-                showUpdateNotification(data);
-            });
+                socket.on('nfc_reader_unavailable', (data) => {
+                    console.error('NFC reader unavailable:', data);
+                    updateStatus('NFC-Lesegerät nicht erkannt', '#e74c3c', '🚫', false, 0, false);
+                    updateSystemStatus('NFC Fehler', 'rgba(231, 76, 60, 0.9)', '🚫');
 
-            socket.on('version_info', function (data) {
-                console.log('📨 Received version_info event:', data);
-                console.log('🏷️  Tag name received:', data ? data.tag_name : 'no data');
-                updateVersionDisplay(data);
-            });
+                    // Add visual indication for missing NFC reader
+                    const container = document.getElementById('main-container');
+                    if (container) container.classList.add('nfc-unavailable');
 
-            socket.on('restart_countdown', function (data) {
-                showRestartCountdown(data);
-            });
+                    // Show detailed NFC error message
+                    showNFCReaderError(data.message || 'NFC-Lesegerät nicht verfügbar');
+                });
 
-            socket.on('update_check_complete', function (data) {
-                console.log('📋 Update check completed:', data);
+                socket.on('system_updated', function (data) {
+                    showUpdateNotification(data);
+                });
 
-                if (data.updates_available) {
-                    // Updates are available
-                    updateSystemStatus(`Update verfügbar: ${data.new_version}`, 'rgba(255, 152, 0, 0.9)', '🆕');
+                socket.on('version_info', function (data) {
+                    console.log('📨 Received version_info event:', data);
+                    console.log('🏷️  Tag name received:', data ? data.tag_name : 'no data');
+                    updateVersionDisplay(data);
+                });
 
-                    // Show notification about available update
-                    setTimeout(() => {
-                        // Will be handled by existing update system
-                    }, 1000);
-                } else {
-                    // No updates available - reset status
-                    updateSystemStatus('Aktuell', 'rgba(39, 174, 96, 0.9)', '✅');
+                socket.on('restart_countdown', function (data) {
+                    showRestartCountdown(data);
+                });
 
-                    // Auto-reset status bubble after 3 seconds
+                socket.on('update_check_complete', function (data) {
+                    console.log('📋 Update check completed:', data);
+
+                    if (data.updates_available) {
+                        // Updates are available
+                        updateSystemStatus(`Update verfügbar: ${data.new_version}`, 'rgba(255, 152, 0, 0.9)', '🆕');
+
+                        // Show notification about available update
+                        setTimeout(() => {
+                            // Will be handled by existing update system
+                        }, 1000);
+                    } else {
+                        // No updates available - reset status
+                        updateSystemStatus('Aktuell', 'rgba(39, 174, 96, 0.9)', '✅');
+
+                        // Auto-reset status bubble after 3 seconds
+                        setTimeout(() => {
+                            updateSystemStatus('Connected', 'rgba(39, 174, 96, 0.9)', '🟢');
+                        }, 3000);
+                    }
+                });
+
+                socket.on('update_error', function (data) {
+                    console.error('❌ Update error:', data);
+                    updateSystemStatus('Update Fehler', 'rgba(231, 76, 60, 0.9)', '❌');
+
+                    // Show error details briefly, then reset
                     setTimeout(() => {
                         updateSystemStatus('Connected', 'rgba(39, 174, 96, 0.9)', '🟢');
-                    }, 3000);
-                }
-            });
+                    }, 5000);
+                });
 
-            socket.on('update_error', function (data) {
-                console.error('❌ Update error:', data);
-                updateSystemStatus('Update Fehler', 'rgba(231, 76, 60, 0.9)', '❌');
+                socket.on('update_disabled', function (data) {
+                    console.warn('🚫 Updates disabled:', data);
+                    updateSystemStatus('Updates deaktiviert', 'rgba(231, 126, 34, 0.9)', '🚫');
 
-                // Show error details briefly, then reset
-                setTimeout(() => {
-                    updateSystemStatus('Connected', 'rgba(39, 174, 96, 0.9)', '🟢');
-                }, 5000);
-            });
+                    // Reset status after showing disabled message
+                    setTimeout(() => {
+                        updateSystemStatus('Connected', 'rgba(39, 174, 96, 0.9)', '🟢');
+                    }, 4000);
+                });
 
-            socket.on('update_disabled', function (data) {
-                console.warn('🚫 Updates disabled:', data);
-                updateSystemStatus('Updates deaktiviert', 'rgba(231, 126, 34, 0.9)', '🚫');
+                // Initial connection attempt
+                updateStatus('Verbindung wird hergestellt...', '#95a5a6', '⏳');
+                updateSystemStatus('Verbindung...', 'rgba(52, 152, 219, 0.9)', '🔵');
+                startConnectionTimeout();
 
-                // Reset status after showing disabled message
-                setTimeout(() => {
-                    updateSystemStatus('Connected', 'rgba(39, 174, 96, 0.9)', '🟢');
-                }, 4000);
-            });
-
-            // Initial connection attempt
-            updateStatus('Verbindung wird hergestellt...', '#95a5a6', '⏳');
-            updateSystemStatus('Verbindung...', 'rgba(52, 152, 219, 0.9)', '🔵');
-            startConnectionTimeout();
-
-        } catch (e) {
-            console.error(e);
-            updateStatus('Fehler bei der Initialisierung', '#e74c3c', '💥');
-            updateSystemStatus('Fehler', 'rgba(231, 76, 60, 0.9)', '💥');
-            clearConnectionTimeout();
-        }
-
-        // Fallback: Try to request version info after a short delay
-        setTimeout(() => {
-            if (isConnected) {
-                console.log('Fallback version info request');
-                requestVersionInfo();
+            } catch (e) {
+                console.error(e);
+                updateStatus('Fehler bei der Initialisierung', '#e74c3c', '💥');
+                updateSystemStatus('Fehler', 'rgba(231, 76, 60, 0.9)', '💥');
+                clearConnectionTimeout();
             }
-        }, 2000);
+
+            // Fallback: Try to request version info after a short delay
+            setTimeout(() => {
+                if (isConnected) {
+                    console.log('Fallback version info request');
+                    requestVersionInfo();
+                }
+            }, 2000);
+        });
 
         // End injected JS
     </script>
@@ -980,7 +987,7 @@
         #company-logo {
             height: 50px;
             width: auto;
-            max-width: 200px;
+            max-width: 300px;
             border-radius: 8px;
             box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
             transition: all 0.3s ease;
@@ -1396,9 +1403,7 @@
             style="position:absolute; top:2rem; right:2rem; z-index:200; display:flex; gap:6px; align-items:center;">
             <span id="connection-status-icon">🔌</span>
             <span id="connection-status-text">System Status</span>
-            <span id="backend-status"
-                style="padding:0.35rem 0.7rem; border-radius:12px; font-weight:bold; background: rgba(149,165,166,0.9); color:#2c3e50; font-size:0.9rem; white-space:nowrap;">Backend:
-                Unbekannt</span>
+            <span id="backend-status" style="display: none;">Backend: Unbekannt</span>
         </div>
         <div id="version-info" onclick="checkForUpdates()"
             style="position: absolute; bottom: 10px; left: 10px; font-size: 12px; color: #7f8c8d; cursor: pointer; opacity: 0.7; transition: all 0.2s; z-index: 100; background: rgba(255, 255, 255, 0.8); padding: 4px 8px; border-radius: 4px;"
